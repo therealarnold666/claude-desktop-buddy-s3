@@ -91,7 +91,9 @@ void bleInit(const char* deviceName) {
   // Request the biggest MTU we can get. macOS negotiates to 185 typically.
   BLEDevice::setMTU(517);
 
-  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+  // For Codex bridge usage, avoid mandatory MITM pairing so generic BLE
+  // clients (e.g. bleak) can discover services and exchange frames directly.
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_NO_MITM);
   BLEDevice::setSecurityCallbacks(new SecCallbacks());
 
   server = BLEDevice::createServer();
@@ -103,22 +105,22 @@ void bleInit(const char* deviceName) {
     NUS_TX_UUID,
     BLECharacteristic::PROPERTY_NOTIFY
   );
-  txChar->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED);
+  txChar->setAccessPermissions(ESP_GATT_PERM_READ);
   BLE2902* cccd = new BLE2902();
-  cccd->setAccessPermissions(ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
+  cccd->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
   txChar->addDescriptor(cccd);
 
   rxChar = svc->createCharacteristic(
     NUS_RX_UUID,
     BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
   );
-  rxChar->setAccessPermissions(ESP_GATT_PERM_WRITE_ENCRYPTED);
+  rxChar->setAccessPermissions(ESP_GATT_PERM_WRITE);
   rxChar->setCallbacks(new RxCallbacks());
 
   svc->start();
 
   BLESecurity* sec = new BLESecurity();
-  sec->setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  sec->setAuthenticationMode(ESP_LE_AUTH_NO_BOND);
   sec->setCapability(ESP_IO_CAP_OUT);
   sec->setKeySize(16);
   sec->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);

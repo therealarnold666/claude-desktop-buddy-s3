@@ -1,9 +1,9 @@
 #include "../buddy.h"
 #include "../buddy_common.h"
-#include <M5StickCPlus.h>
+#include "m5_compat.h"
 #include <string.h>
 
-extern TFT_eSprite spr;
+extern BuddySprite spr;
 
 namespace rabbit {
 

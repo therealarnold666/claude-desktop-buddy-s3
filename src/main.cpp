@@ -1,11 +1,11 @@
-#include <M5StickCPlus.h>
+#include "m5_compat.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
 
-TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
+BuddySprite spr = BuddySprite(&M5.Lcd);
 
 // Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
 // in one room are distinguishable in the desktop picker. Name persists in
@@ -94,12 +94,12 @@ static bool isFaceDown() {
   return az < -0.7f && fabsf(ax) < 0.4f && fabsf(ay) < 0.4f;
 }
 
-static void applyBrightness() { M5.Axp.ScreenBreath(20 + brightLevel * 20); }
+static void applyBrightness() { compatScreenBreath(20 + brightLevel * 20); }
 
 static void wake() {
   lastInteractMs = millis();
   if (screenOff) {
-    M5.Axp.SetLDO2(true);
+    compatSetLDO2(true);
     applyBrightness();
     screenOff = false;
     wakeTransitionUntil = millis() + 12000;
@@ -305,7 +305,7 @@ static void drawReset() {
 void menuConfirm() {
   switch (menuSel) {
     case 0: settingsOpen = true; menuOpen = false; settingsSel = 0; break;
-    case 1: M5.Axp.PowerOff(); break;
+    case 1: compatPowerOff(); break;
     case 2:
     case 3:
       menuOpen = false;
@@ -356,9 +356,9 @@ static bool            _onUsb       = false;
 static void clockRefreshRtc() {
   if (millis() - _clkLastRead < 1000) return;
   _clkLastRead = millis();
-  _onUsb = M5.Axp.GetVBusVoltage() > 4.0f;
-  M5.Rtc.GetTime(&_clkTm);
-  M5.Rtc.GetDate(&_clkDt);
+  _onUsb = compatGetVBusVoltage() > 4.0f;
+  compatRtcGetTime(&_clkTm);
+  compatRtcGetDate(&_clkDt);
 }
 
 static void clockUpdateOrient() {
@@ -593,9 +593,9 @@ void drawInfo() {
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
-    int vBat_mV = (int)(M5.Axp.GetBatVoltage() * 1000);
-    int iBat_mA = (int)M5.Axp.GetBatCurrent();
-    int vBus_mV = (int)(M5.Axp.GetVBusVoltage() * 1000);
+    int vBat_mV = (int)(compatGetBatVoltage() * 1000);
+    int iBat_mA = (int)compatGetBatCurrent();
+    int vBus_mV = (int)(compatGetVBusVoltage() * 1000);
     int pct = (vBat_mV - 3200) / 10;   // (v-3.2)/(4.2-3.2)*100 = (v-3.2)*100 = (mv-3200)/10
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     bool usb = vBus_mV > 4000;
@@ -627,7 +627,7 @@ void drawInfo() {
     ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
     ln("  bright   %u/4", brightLevel);
     ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
-    ln("  temp     %dC", (int)M5.Axp.GetTempInAXP192());
+    ln("  temp     %dC", (int)compatGetAxpTemp());
 
   } else if (infoPage == 4) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
@@ -938,7 +938,7 @@ void drawHUD() {
 void setup() {
   M5.begin();
   M5.Lcd.setRotation(0);
-  M5.Imu.Init();
+  compatImuInit();
   M5.Beep.begin();
   startBt();
   pinMode(LED_PIN, OUTPUT);
@@ -987,7 +987,7 @@ void setup() {
 
 void loop() {
   M5.update();
-  M5.Beep.update();
+  compatBeepUpdate();
   t++;
   uint32_t now = millis();
 
@@ -1053,11 +1053,11 @@ void loop() {
 
   // AXP power button (left side): short-press toggles screen off.
   // Long-press (6s) still powers off the device via AXP hardware.
-  if (M5.Axp.GetBtnPress() == 0x02) {
+  if (compatGetBtnPress() == 0x02) {
     if (screenOff) {
       wake();
     } else {
-      M5.Axp.SetLDO2(false);
+      compatSetLDO2(false);
       screenOff = true;
     }
   }
@@ -1243,7 +1243,7 @@ void loop() {
   if (!napping && faceDownFrames >= 15) {
     napping = true;
     napStartMs = now;
-    M5.Axp.ScreenBreath(8);
+    compatScreenBreath(8);
     dimmed = true;
   } else if (napping && faceDownFrames <= -8) {
     napping = false;
@@ -1257,7 +1257,7 @@ void loop() {
   // No auto-off on USB power — clock face wants to stay visible while charging.
   if (!screenOff && !inPrompt && !_onUsb
       && millis() - lastInteractMs > SCREEN_OFF_MS) {
-    M5.Axp.SetLDO2(false);
+    compatSetLDO2(false);
     screenOff = true;
   }
 
