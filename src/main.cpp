@@ -54,6 +54,7 @@ const uint8_t PET_PAGES = 2;
 uint8_t msgScroll = 0;
 uint16_t lastLineGen = 0;
 char     lastPromptId[40] = "";
+char     lastHandledPromptId[40] = "";
 uint32_t lastInteractMs = 0;
 bool     dimmed = false;
 bool     screenOff = false;
@@ -908,8 +909,12 @@ void drawPet() {
   spr.printf("%u/%u", petPage + 1, PET_PAGES);
 }
 
+static bool promptActive() {
+  return tama.promptId[0] && !responseSent;
+}
+
 void drawHUD() {
-  if (tama.promptId[0]) { drawApproval(); return; }
+  if (promptActive()) { drawApproval(); return; }
   const Palette& p = characterPalette();
   const int SHOW = 3, LH = 8, WIDTH = 21;
   const int AREA = SHOW * LH + 4;
@@ -1045,8 +1050,18 @@ void loop() {
   if (strcmp(tama.promptId, lastPromptId) != 0) {
     strncpy(lastPromptId, tama.promptId, sizeof(lastPromptId)-1);
     lastPromptId[sizeof(lastPromptId)-1] = 0;
-    responseSent = false;
-    if (tama.promptId[0]) {
+    if (tama.promptId[0] == 0) {
+      // Bridge clear snapshot arrived — allow future prompts normally.
+      responseSent = false;
+      lastHandledPromptId[0] = 0;
+    } else if (strcmp(tama.promptId, lastHandledPromptId) == 0) {
+      // Ignore stale replay of a prompt we've already answered.
+      responseSent = true;
+      tama.promptId[0] = 0;
+      tama.promptTool[0] = 0;
+      tama.promptHint[0] = 0;
+    } else {
+      responseSent = false;
       promptArrivedMs = millis();
       wake();
       beep(1200, 80);   // alert chirp
@@ -1060,7 +1075,7 @@ void loop() {
     }
   }
 
-  bool inPrompt = tama.promptId[0] && !responseSent;
+  bool inPrompt = promptActive();
 
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
@@ -1102,7 +1117,12 @@ void loop() {
         char cmd[96];
         snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"once\"}", tama.promptId);
         sendCmd(cmd);
+        strncpy(lastHandledPromptId, tama.promptId, sizeof(lastHandledPromptId)-1);
+        lastHandledPromptId[sizeof(lastHandledPromptId)-1] = 0;
         responseSent = true;
+        tama.promptId[0] = 0;
+        tama.promptTool[0] = 0;
+        tama.promptHint[0] = 0;
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
         beep(2400, 60);
@@ -1135,7 +1155,12 @@ void loop() {
       char cmd[96];
       snprintf(cmd, sizeof(cmd), "{\"cmd\":\"permission\",\"id\":\"%s\",\"decision\":\"deny\"}", tama.promptId);
       sendCmd(cmd);
+      strncpy(lastHandledPromptId, tama.promptId, sizeof(lastHandledPromptId)-1);
+      lastHandledPromptId[sizeof(lastHandledPromptId)-1] = 0;
       responseSent = true;
+      tama.promptId[0] = 0;
+      tama.promptTool[0] = 0;
+      tama.promptHint[0] = 0;
       statsOnDenial();
       beep(600, 60);
     } else if (resetOpen) {

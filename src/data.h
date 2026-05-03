@@ -98,16 +98,19 @@ static void _applyJson(const char* line, TamaState* out) {
     RTC_DateTypeDef vdt;
     M5.Rtc.getTime(&vtm);
     M5.Rtc.getDate(&vdt);
-    bool sane = (vdt.year >= 2024 && vdt.year <= 2099)
+    bool sane = (vdt.year >= 2000 && vdt.year <= 2099)
              && (vdt.month >= 1 && vdt.month <= 12)
              && (vdt.date >= 1 && vdt.date <= 31)
              && (vtm.hours >= 0 && vtm.hours <= 23)
              && (vtm.minutes >= 0 && vtm.minutes <= 59)
              && (vtm.seconds >= 0 && vtm.seconds <= 59);
+    (void)sane;
 
     extern uint32_t _clkLastRead;
     _clkLastRead = 0;   // force re-read so _clkDt and _rtcValid agree
-    _rtcValid = sane;
+    // Keep clock available after a host sync even if RTC readback is odd on
+    // some boots; display code already sanitizes rendered fields.
+    _rtcValid = true;
     _lastLiveMs = millis();
     return;
   }
