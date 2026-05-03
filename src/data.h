@@ -78,16 +78,36 @@ static void _applyJson(const char* line, TamaState* out) {
   if (!t.isNull() && t.size() == 2) {
     time_t local = (time_t)t[0].as<uint32_t>() + (int32_t)t[1];
     struct tm lt; gmtime_r(&local, &lt);
+
     RTC_TimeTypeDef tm;
-    tm.hours = (uint8_t)lt.tm_hour; tm.minutes = (uint8_t)lt.tm_min; tm.seconds = (uint8_t)lt.tm_sec;
+    tm.hours = (int8_t)lt.tm_hour;
+    tm.minutes = (int8_t)lt.tm_min;
+    tm.seconds = (int8_t)lt.tm_sec;
+
     RTC_DateTypeDef dt;
-    dt.year = (uint16_t)(lt.tm_year + 1900); dt.month = (uint8_t)(lt.tm_mon + 1);
-    dt.date = (uint8_t)lt.tm_mday;          dt.weekDay = (uint8_t)lt.tm_wday;
-    M5.Rtc.setTime(&tm);
-    M5.Rtc.setDate(&dt);
+    dt.year = (int16_t)(lt.tm_year + 1900);
+    dt.month = (int8_t)(lt.tm_mon + 1);
+    dt.date = (int8_t)lt.tm_mday;
+    dt.weekDay = (int8_t)lt.tm_wday;
+
+    // Apply date+time as one transaction, then read back to make sure
+    // the RTC actually accepted the host timestamp.
+    M5.Rtc.setDateTime(&dt, &tm);
+
+    RTC_TimeTypeDef vtm;
+    RTC_DateTypeDef vdt;
+    M5.Rtc.getTime(&vtm);
+    M5.Rtc.getDate(&vdt);
+    bool sane = (vdt.year >= 2024 && vdt.year <= 2099)
+             && (vdt.month >= 1 && vdt.month <= 12)
+             && (vdt.date >= 1 && vdt.date <= 31)
+             && (vtm.hours >= 0 && vtm.hours <= 23)
+             && (vtm.minutes >= 0 && vtm.minutes <= 59)
+             && (vtm.seconds >= 0 && vtm.seconds <= 59);
+
     extern uint32_t _clkLastRead;
     _clkLastRead = 0;   // force re-read so _clkDt and _rtcValid agree
-    _rtcValid = true;
+    _rtcValid = sane;
     _lastLiveMs = millis();
     return;
   }

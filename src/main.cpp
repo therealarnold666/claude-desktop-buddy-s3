@@ -408,13 +408,34 @@ static const char* const MON[] = {
 };
 static const char* const DOW[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 
-static uint8_t clockDow() { return _clkDt.weekDay % 7; }
+static uint8_t clockDow() {
+  int wd = _clkDt.weekDay;
+  if (wd < 0 || wd > 6) return 0;
+  return (uint8_t)wd;
+}
+
 static void drawClock() {
   const Palette& p = characterPalette();
-  char hm[6]; snprintf(hm, sizeof(hm), "%02u:%02u", _clkTm.hours, _clkTm.minutes);
-  char ss[4]; snprintf(ss, sizeof(ss), ":%02u", _clkTm.seconds);
-  uint8_t mi = (_clkDt.month >= 1 && _clkDt.month <= 12) ? _clkDt.month - 1 : 0;
-  char dl[8]; snprintf(dl, sizeof(dl), "%s %02u", MON[mi], _clkDt.date);
+
+  // RTC fields are signed 8-bit in M5Unified; sanitize before formatting so
+  // transient invalid reads never render as odd values.
+  int hh = _clkTm.hours;
+  int mm = _clkTm.minutes;
+  int sec = _clkTm.seconds;
+  int month = _clkDt.month;
+  int day = _clkDt.date;
+  if (hh < 0 || hh > 23) hh = 0;
+  if (mm < 0 || mm > 59) mm = 0;
+  if (sec < 0 || sec > 59) sec = 0;
+  if (month < 1 || month > 12) month = 1;
+  if (day < 1 || day > 31) day = 1;
+
+  uint8_t mi = (uint8_t)(month - 1);
+  uint8_t wd = clockDow();
+
+  char hm[6]; snprintf(hm, sizeof(hm), "%02d:%02d", hh, mm);
+  char ss[4]; snprintf(ss, sizeof(ss), ":%02d", sec);
+  char dl[12]; snprintf(dl, sizeof(dl), "%s %02d", MON[mi], day);
 
   if (clockOrient == 0) {
     paintedOrient = 0;
@@ -439,10 +460,10 @@ static void drawClock() {
 
   // Seconds tick at 1Hz; redrawing 3 strings at 60fps is 180 SPI ops/sec
   // for nothing. Gate on the second changing (or full repaint).
-  if (repaint || _clkTm.seconds != lastSec) {
-    lastSec = _clkTm.seconds;
-    char wdl[12]; snprintf(wdl, sizeof(wdl), "%s %s %02u", DOW[clockDow()], MON[mi], _clkDt.date);
-    char ssl[3]; snprintf(ssl, sizeof(ssl), "%02u", _clkTm.seconds);
+  if (repaint || sec != lastSec) {
+    lastSec = (uint8_t)sec;
+    char wdl[16]; snprintf(wdl, sizeof(wdl), "%s %s %02d", DOW[wd], MON[mi], day);
+    char ssl[3]; snprintf(ssl, sizeof(ssl), "%02d", sec);
     M5.Lcd.setTextDatum(MC_DATUM);
     M5.Lcd.setTextSize(3); M5.Lcd.setTextColor(p.text, p.bg);    M5.Lcd.drawString(hm, 170, 42);
     M5.Lcd.setTextSize(2); M5.Lcd.setTextColor(p.textDim, p.bg); M5.Lcd.drawString(ssl, 170, 72);
