@@ -1,6 +1,7 @@
 #include "m5_compat.h"
 #include <LittleFS.h>
 #include <stdarg.h>
+#include <time.h>
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
@@ -353,13 +354,35 @@ static uint8_t paintedOrient = 0;
 static RTC_TimeTypeDef _clkTm;
 static RTC_DateTypeDef _clkDt;
 uint32_t               _clkLastRead = 0;   // zeroed by data.h on time-sync
+time_t                 _clkEpochLocal = 0; // local epoch (already tz-adjusted)
+uint32_t               _clkEpochSetMs = 0;
+bool                   _clkEpochValid = false;
 static bool            _onUsb       = false;
 static void clockRefreshRtc() {
   if (millis() - _clkLastRead < 1000) return;
   _clkLastRead = millis();
   _onUsb = compat::vbusVoltageV() > 4.0f;
-  M5.Rtc.getTime(&_clkTm);
-  M5.Rtc.getDate(&_clkDt);
+  if (_clkEpochValid) {
+    time_t cur = _clkEpochLocal + (time_t)((millis() - _clkEpochSetMs) / 1000);
+    struct tm lt;
+    gmtime_r(&cur, &lt);
+    _clkTm.hours = (int8_t)lt.tm_hour;
+    _clkTm.minutes = (int8_t)lt.tm_min;
+    _clkTm.seconds = (int8_t)lt.tm_sec;
+    _clkDt.year = (int16_t)(lt.tm_year + 1900);
+    _clkDt.month = (int8_t)(lt.tm_mon + 1);
+    _clkDt.date = (int8_t)lt.tm_mday;
+    _clkDt.weekDay = (int8_t)lt.tm_wday;
+  } else {
+    M5.Rtc.getTime(&_clkTm);
+    M5.Rtc.getDate(&_clkDt);
+  }
+}
+
+// Hardware mounting makes +ax correspond to the opposite landscape
+// rotation from what users expect while holding the stick.
+static uint8_t _orientFromAx(float ax) {
+  return (ax >= 0) ? 3 : 1;
 }
 
 static void clockUpdateOrient() {
@@ -372,9 +395,9 @@ static void clockUpdateOrient() {
     // gravity so the cradle works either way up. Need a strong tilt
     // for the 1↔3 swap so handling jitter doesn't flip it; otherwise
     // hold whatever we last had (or 1 from boot).
-    if (clockOrient == 0) clockOrient = (ax >= 0) ? 1 : 3;
-    if      (ax >  0.5f && clockOrient != 1) clockOrient = 1;
-    else if (ax < -0.5f && clockOrient != 3) clockOrient = 3;
+    if (clockOrient == 0) clockOrient = _orientFromAx(ax);
+    if      (ax >  0.5f && clockOrient != 3) clockOrient = 3;
+    else if (ax < -0.5f && clockOrient != 1) clockOrient = 1;
     return;
   }
   // Dual threshold: strict to enter (must be clearly sideways), loose to
@@ -387,7 +410,7 @@ static void clockUpdateOrient() {
   if (side) { if (orientFrames < 20) orientFrames++; }
   else      { if (orientFrames > -10) orientFrames--; }
   if (clockOrient == 0 && orientFrames >= 15) {
-    clockOrient = (ax > 0) ? 1 : 3;
+    clockOrient = _orientFromAx(ax);
   } else if (clockOrient != 0 && orientFrames <= -8) {
     clockOrient = 0;
   } else if (clockOrient != 0 && side) {
@@ -395,7 +418,7 @@ static void clockUpdateOrient() {
     // `side` never drops and the exit-via-0 path can't fire. Watch for
     // ax sign disagreeing with the stored orientation.
     static int8_t swapFrames = 0;
-    uint8_t want = (ax > 0) ? 1 : 3;
+    uint8_t want = _orientFromAx(ax);
     if (want != clockOrient) { if (++swapFrames >= 8) { clockOrient = want; swapFrames = 0; } }
     else swapFrames = 0;
   }
@@ -413,6 +436,13 @@ static uint8_t clockDow() {
   int wd = _clkDt.weekDay;
   if (wd < 0 || wd > 6) return 0;
   return (uint8_t)wd;
+}
+
+static uint8_t _lcdRotForClock(uint8_t orient) {
+  // StickS3 mounting is reversed from our logical 1/3 orientation labels.
+  if (orient == 1) return 3;
+  if (orient == 3) return 1;
+  return orient;
 }
 
 static void drawClock() {
@@ -454,10 +484,11 @@ static void drawClock() {
   // Landscape: 240×135 direct-to-LCD. Full fill only on entry; after that
   // text glyph bg cells repaint themselves and the pet box (small, ~90×50)
   // gets a fillRect each pet tick — small enough not to tear.
-  M5.Lcd.setRotation(clockOrient);
+  uint8_t rot = _lcdRotForClock(clockOrient);
+  M5.Lcd.setRotation(rot);
   static uint8_t lastSec = 0xFF;
-  bool repaint = paintedOrient != clockOrient;
-  if (repaint) { M5.Lcd.fillScreen(p.bg); paintedOrient = clockOrient; lastSec = 0xFF; }
+  bool repaint = paintedOrient != rot;
+  if (repaint) { M5.Lcd.fillScreen(p.bg); paintedOrient = rot; lastSec = 0xFF; }
 
   // Seconds tick at 1Hz; redrawing 3 strings at 60fps is 180 SPI ops/sec
   // for nothing. Gate on the second changing (or full repaint).
