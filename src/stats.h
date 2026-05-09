@@ -69,43 +69,20 @@ inline void statsOnApproval(uint32_t secondsToRespond) {
   _dirty = true; statsSave();
 }
 
-// Tokens feed the pet. 50K per level, 5K per pip on the fed bar.
-// Bridge sends cumulative since its start; we add the delta. A drop means
-// the bridge restarted — resync without adding, don't lose NVS progress.
-static uint32_t _lastBridgeTokens = 0;
-static bool _tokensSynced = false;       // first-sight latch — see below
+// Tokens feed the pet. Bridge sends the incremental output-token delta earned
+// by a completed turn. We accumulate and persist locally so the stick owns the
+// displayed lifetime total across reboots.
 static bool _levelUpPending = false;
 
-inline void statsOnBridgeTokens(uint32_t bridgeTotal) {
-  // The bridge sends its cumulative total since IT started. We track deltas.
-  // Bridge restart → number drops → resync. But on DEVICE reboot,
-  // _lastBridgeTokens is back to 0 while the bridge's total isn't — first
-  // packet would re-credit the entire session. Latch on first sight instead.
-  if (!_tokensSynced) {
-    _lastBridgeTokens = bridgeTotal;
-    _tokensSynced = true;
-    return;
-  }
-  if (bridgeTotal < _lastBridgeTokens) {
-    _lastBridgeTokens = bridgeTotal;     // bridge restarted
-    return;
-  }
-  uint32_t delta = bridgeTotal - _lastBridgeTokens;
-  _lastBridgeTokens = bridgeTotal;
+inline void statsOnBridgeTokens(uint32_t delta) {
   if (delta == 0) return;
 
   uint8_t lvlBefore = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
   _stats.tokens += delta;
   uint8_t lvlAfter = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
-
-  // Heartbeats are timer-driven telemetry — don't wear NVS on every delta.
-  // Tokens accumulate in RAM, persist only on the milestone. Worst case on
-  // hard power-off: lose up to 50K tokens of progress.
-  if (lvlAfter > lvlBefore) {
-    _stats.level = lvlAfter;
-    _levelUpPending = true;
-    _dirty = true; statsSave();
-  }
+  if (lvlAfter > lvlBefore) _levelUpPending = true;
+  _stats.level = lvlAfter;
+  _dirty = true; statsSave();
 }
 
 inline bool statsPollLevelUp() {
@@ -157,15 +134,16 @@ inline uint8_t statsMoodTier() {
   return (uint8_t)tier;
 }
 
-// Energy: starts at 3/5 on boot, tops up to full on nap end, drains 1 tier per 2h.
-static uint32_t _lastNapEndMs = 0;
-static uint8_t  _energyAtNap  = 3;
+// Energy: starts at 3/5 on boot. A real sleep lasting 30m+ restores it to
+// full when the buddy wakes, then it drains 1 tier per 2h.
+static uint32_t _lastWakeMs = 0;
+static uint8_t  _energyAtWake  = 3;
 
-inline void statsOnWake() { _lastNapEndMs = millis(); _energyAtNap = 5; }
+inline void statsOnWake() { _lastWakeMs = millis(); _energyAtWake = 5; }
 
 inline uint8_t statsEnergyTier() {
-  uint32_t hoursSince = (millis() - _lastNapEndMs) / 3600000;
-  int8_t e = (int8_t)_energyAtNap - (int8_t)(hoursSince / 2);
+  uint32_t hoursSince = (millis() - _lastWakeMs) / 3600000;
+  int8_t e = (int8_t)_energyAtWake - (int8_t)(hoursSince / 2);
   if (e < 0) e = 0; if (e > 5) e = 5;
   return (uint8_t)e;
 }

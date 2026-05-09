@@ -84,10 +84,15 @@ static void nextPet() {
 }
 uint32_t wakeTransitionUntil = 0;
 const uint32_t SCREEN_OFF_MS = 30000;
+const uint32_t USB_IDLE_SLEEP_MS = 30UL * 60UL * 1000UL;
+const uint32_t ENERGY_RESTORE_SLEEP_MS = 30UL * 60UL * 1000UL;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
 uint32_t promptArrivedMs = 0;
+uint32_t idleStartedMs = 0;
+bool     sleepStateActive = true;
+uint32_t sleepStateStartedMs = 0;
 
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 static bool isFaceDown() {
@@ -109,6 +114,40 @@ static void wake() {
   if (dimmed) { applyBrightness(); dimmed = false; }
 }
 bool     responseSent = false;
+
+struct BatteryUiState {
+  bool initialized = false;
+  uint32_t lastSampleMs = 0;
+  int filteredBatMv = 0;
+  int filteredCurrentMa = 0;
+  int filteredVbusMv = 0;
+};
+
+static BatteryUiState batteryUi;
+
+static void sampleBatteryUi(uint32_t now) {
+  int rawBatMv = (int)(compat::batVoltageV() * 1000);
+  int rawCurrentMa = (int)compat::batCurrentMA();
+  int rawVbusMv = (int)(compat::vbusVoltageV() * 1000);
+
+  if (!batteryUi.initialized) {
+    batteryUi.initialized = true;
+    batteryUi.filteredBatMv = rawBatMv;
+    batteryUi.filteredCurrentMa = rawCurrentMa;
+    batteryUi.filteredVbusMv = rawVbusMv;
+    batteryUi.lastSampleMs = now;
+    return;
+  }
+
+  if ((now - batteryUi.lastSampleMs) < 1500) return;
+  batteryUi.lastSampleMs = now;
+
+  // Battery voltage jitters noticeably on the PMIC ADC; smooth it before
+  // mapping to a percentage so the UI does not bounce every frame.
+  batteryUi.filteredBatMv = (batteryUi.filteredBatMv * 7 + rawBatMv) / 8;
+  batteryUi.filteredCurrentMa = (batteryUi.filteredCurrentMa * 3 + rawCurrentMa) / 4;
+  batteryUi.filteredVbusMv = (batteryUi.filteredVbusMv * 3 + rawVbusMv) / 4;
+}
 
 static void beep(uint16_t freq, uint16_t dur) {
   if (settings().sound) compat::beep(freq, dur);
@@ -699,9 +738,9 @@ void drawInfo() {
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
-    int vBat_mV = (int)(compat::batVoltageV() * 1000);
-    int iBat_mA = (int)compat::batCurrentMA();
-    int vBus_mV = (int)(compat::vbusVoltageV() * 1000);
+    int vBat_mV = batteryUi.filteredBatMv;
+    int iBat_mA = batteryUi.filteredCurrentMa;
+    int vBus_mV = batteryUi.filteredVbusMv;
     int pct = (vBat_mV - 3200) / 10;   // (v-3.2)/(4.2-3.2)*100 = (v-3.2)*100 = (mv-3200)/10
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     bool usb = vBus_mV > 4000;
@@ -1162,10 +1201,16 @@ void loop() {
   M5.update();
   t++;
   uint32_t now = millis();
+  sampleBatteryUi(now);
 
   dataPoll(&tama);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
+  if (baseState == P_IDLE) {
+    if (idleStartedMs == 0) idleStartedMs = now;
+  } else {
+    idleStartedMs = 0;
+  }
 
   // After waking the screen, hold sleep for 12s so users see the wake-up
   // animation. Urgent states (attention, celebrate, busy) override this.
@@ -1334,6 +1379,8 @@ void loop() {
   // by the bridge. Pet sleeps underneath. Exit restores Y via
   // applyDisplayMode() so the next mode-switch isn't visually offset.
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
+  bool usbIdleSleep = _onUsb && idleStartedMs != 0 && (now - idleStartedMs) >= USB_IDLE_SLEEP_MS;
+  if (baseState == P_IDLE && usbIdleSleep) baseState = P_SLEEP;
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
   bool clocking = displayMode == DISP_NORMAL
@@ -1356,7 +1403,17 @@ void loop() {
   }
   if (clocking) {
     uint8_t h = _clkTm.hours;
-    activeState = (h < 8) ? P_SLEEP : P_IDLE;
+    activeState = (h < 8 || usbIdleSleep) ? P_SLEEP : P_IDLE;
+  }
+
+  bool sleepingNow = activeState == P_SLEEP;
+  if (sleepingNow && !sleepStateActive) {
+    sleepStateActive = true;
+    sleepStateStartedMs = now;
+  } else if (!sleepingNow && sleepStateActive) {
+    uint32_t sleptMs = now - sleepStateStartedMs;
+    sleepStateActive = false;
+    if (sleptMs >= ENERGY_RESTORE_SLEEP_MS) statsOnWake();
   }
 
   static uint32_t lastPasskey = 0;
@@ -1427,7 +1484,6 @@ void loop() {
   } else if (napping && faceDownFrames <= -8) {
     napping = false;
     statsOnNapEnd((now - napStartMs) / 1000);
-    statsOnWake();
     wake();
   }
 
