@@ -14,6 +14,20 @@ DATA    = PROJECT / "data" / "characters"
 CAP     = 1_800_000
 
 
+def _find_platformio() -> list[str]:
+    for cmd in (["pio"], ["platformio"]):
+        if shutil.which(cmd[0]):
+            return cmd
+    raise SystemExit(
+        "PlatformIO CLI not found. Install it first, then rerun either:\n"
+        "  pipx install platformio\n"
+        "or:\n"
+        "  python3 -m pip install --user platformio\n"
+        "After install, run:\n"
+        "  pio run -t uploadfs"
+    )
+
+
 def flash(src: Path) -> None:
     if not (src / "manifest.json").exists():
         sys.exit(f"no manifest.json in {src} — run tools/prep_character.py first")
@@ -31,7 +45,7 @@ def flash(src: Path) -> None:
     shutil.copytree(src, dst)
     print(f"staged {name}: {total:,} bytes -> {dst}")
 
-    subprocess.run(["pio", "run", "-t", "uploadfs"], cwd=PROJECT, check=True)
+    subprocess.run([*_find_platformio(), "run", "-t", "uploadfs"], cwd=PROJECT, check=True)
     print(f"\nflashed. on the stick: hold A -> settings -> species -> GIF")
 
 
