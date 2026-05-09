@@ -121,7 +121,7 @@ static void sendCmd(const char* json) {
   bleWrite((const uint8_t*)"\n", 1);
 }
 const uint8_t INFO_PAGES = 6;
-const uint8_t INFO_PG_BUTTONS = 1;
+const uint8_t INFO_PG_BUTTONS = 2;
 const uint8_t INFO_PG_CREDITS = 5;
 
 void applyDisplayMode() {
@@ -470,13 +470,14 @@ static void drawClock() {
 
   if (clockOrient == 0) {
     paintedOrient = 0;
-    // Bottom half — buddy naturally lives at y=0..82, GIF peeks at top
-    // via peek mode. Clearing from 90 leaves both untouched.
-    spr.fillRect(0, 90, W, H - 90, p.bg);
+    // Portrait clock keeps the GIF at the same full-size home scale, so
+    // reserve the lower 100px for the clock face and leave the upper area
+    // untouched for the character.
+    spr.fillRect(0, 140, W, H - 140, p.bg);
     spr.setTextDatum(MC_DATUM);
-    spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 140);
-    spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 175);
-    spr.setTextSize(1);                                     spr.drawString(dl, CX, 200);
+    spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 168);
+    spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 198);
+    spr.setTextSize(1);                                     spr.drawString(dl, CX, 220);
     spr.setTextDatum(TL_DATUM);
     return;
   }
@@ -530,10 +531,10 @@ static void drawClock() {
 }
 
 PersonaState derive(const TamaState& s) {
-  if (!s.connected)            return P_IDLE;
+  if (!s.connected)            return P_SLEEP;
   if (s.sessionsWaiting > 0)   return P_ATTENTION;
   if (s.recentlyCompleted)     return P_CELEBRATE;
-  if (s.sessionsRunning >= 3)  return P_BUSY;
+  if (s.sessionsRunning >= 1)  return P_BUSY;
   return P_IDLE;   // connected, 0+ sessions, nothing urgent — hang out
 }
 
@@ -594,9 +595,77 @@ void drawInfo() {
   };
 
   if (infoPage == 0) {
+    _infoHeader(p, y, "CODEX", infoPage);
+    uint32_t age = (millis() - tama.lastUpdated) / 1000;
+    const int LEFT_X = 17;
+    const int RUN_CENTER_X = 38;
+    const int WAIT_CENTER_X = 96;
+    const int WAIT_LABEL_X = WAIT_CENTER_X - 21;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("RUNNING");
+    spr.setCursor(WAIT_LABEL_X, y);
+    spr.print("WAITING");
+    y += 10;
+
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextSize(3);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String(tama.sessionsRunning), RUN_CENTER_X, y);
+    spr.drawString(String(tama.sessionsWaiting), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextSize(1);
+    y += 30;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("SESSIONS");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String(tama.sessionsTotal), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 16;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("LINK");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(dataScenarioName(), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("BLE");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(!bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN", WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("LAST MSG");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String((unsigned long)age) + "s", WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("STATE");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(stateNames[activeState], WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+
+  } else if (infoPage == 1) {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
-    ln("I watch your Claude");
+    ln("I watch your Codex");
     ln("desktop sessions.");
     y += 6;
     ln("I sleep when nothing's");
@@ -613,7 +682,7 @@ void drawInfo() {
     ln("18 species. Settings");
     ln("> ascii pet to cycle.");
 
-  } else if (infoPage == 1) {
+  } else if (infoPage == 2) {
     _infoHeader(p, y, "BUTTONS", infoPage);
     spr.setTextColor(p.text, p.bg);    ln("A   front");
     spr.setTextColor(p.textDim, p.bg); ln("    next screen");
@@ -626,22 +695,6 @@ void drawInfo() {
     spr.setTextColor(p.text, p.bg);    ln("Power  left side");
     spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
     ln("    hold 6s = off");
-
-  } else if (infoPage == 2) {
-    _infoHeader(p, y, "CLAUDE", infoPage);
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  sessions  %u", tama.sessionsTotal);
-    ln("  running   %u", tama.sessionsRunning);
-    ln("  waiting   %u", tama.sessionsWaiting);
-    y += 8;
-    spr.setTextColor(p.text, p.bg);
-    ln("LINK");
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  via       %s", dataScenarioName());
-    ln("  ble       %s", !bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN");
-    uint32_t age = (millis() - tama.lastUpdated) / 1000;
-    ln("  last msg  %lus", (unsigned long)age);
-    ln("  state     %s", stateNames[activeState]);
 
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
@@ -710,7 +763,7 @@ void drawInfo() {
       spr.setTextColor(p.text, p.bg);
       ln("TO PAIR");
       spr.setTextColor(p.textDim, p.bg);
-      ln(" Open Claude desktop");
+      ln(" Open Codex desktop");
       ln(" > Developer");
       ln(" > Hardware Buddy");
       y += 4;
@@ -730,7 +783,7 @@ void drawInfo() {
     y += 4;
     spr.setTextColor(p.text, p.bg);
     ln("github.com/anthropics");
-    ln("/claude-desktop-buddy");
+    ln("/codex-buddy");
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
@@ -773,6 +826,51 @@ static uint8_t wrapInto(const char* in, char out[][24], uint8_t maxRows, uint8_t
   }
   if (col > 0 && row < maxRows) { out[row][col] = 0; row++; }
   return row;
+}
+
+static uint8_t wrapIntoCenteredWords(const char* in, char out[][24], uint8_t maxRows, int maxPx) {
+  if (!in || !*in || maxRows == 0) return 0;
+
+  uint8_t row = 0;
+  out[row][0] = 0;
+  const char* p = in;
+
+  while (*p && row < maxRows) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+
+    const char* w = p;
+    while (*p && *p != ' ') p++;
+    size_t wlen = (size_t)(p - w);
+    if (wlen == 0) break;
+    if (wlen > 23) wlen = 23;
+
+    char word[24];
+    memcpy(word, w, wlen);
+    word[wlen] = 0;
+
+    char candidate[24];
+    if (out[row][0]) snprintf(candidate, sizeof(candidate), "%s %s", out[row], word);
+    else snprintf(candidate, sizeof(candidate), "%s", word);
+
+    if (spr.textWidth(candidate) <= maxPx) {
+      snprintf(out[row], 24, "%s", candidate);
+      continue;
+    }
+
+    if (out[row][0] == 0) {
+      // A single overlong token cannot be wrapped without splitting.
+      // Leave it intact on its own line and let the caller decide whether
+      // to shorten upstream content.
+      snprintf(out[row], 24, "%s", word);
+    }
+
+    if (++row >= maxRows) return row;
+    out[row][0] = 0;
+    snprintf(out[row], 24, "%s", word);
+  }
+
+  return out[row][0] ? row + 1 : row;
 }
 
 static void drawApproval() {
@@ -947,17 +1045,29 @@ static bool promptActive() {
 void drawHUD() {
   if (promptActive()) { drawApproval(); return; }
   const Palette& p = characterPalette();
-  const int SHOW = 3, LH = 8, WIDTH = 21;
-  const int AREA = SHOW * LH + 4;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.setTextSize(1);
+  const int SHOW = 2, LH = 16, MAX_PX = 118;
+  const int AREA = SHOW * LH + 10;
+  const int TOP = 170;
+  spr.fillRect(0, TOP, W, AREA, p.bg);
+  spr.setTextSize(2);
+  spr.setTextDatum(MC_DATUM);
 
   if (tama.lineGen != lastLineGen) { msgScroll = 0; lastLineGen = tama.lineGen; wake(); }
 
   if (tama.nLines == 0) {
+    static char msgDisp[8][24];
+    uint8_t nMsg = wrapIntoCenteredWords(tama.msg, msgDisp, 8, MAX_PX);
+    if (nMsg == 0) {
+      spr.setTextDatum(TL_DATUM);
+      return;
+    }
     spr.setTextColor(p.text, p.bg);
-    spr.setCursor(4, H - LH - 2);
-    spr.print(tama.msg);
+    uint8_t shown = nMsg > SHOW ? SHOW : nMsg;
+    int start = nMsg - shown;
+    for (uint8_t i = 0; i < shown; i++) {
+      spr.drawString(msgDisp[start + i], W / 2, TOP + 8 + i * LH);
+    }
+    spr.setTextDatum(TL_DATUM);
     return;
   }
 
@@ -967,7 +1077,7 @@ void drawHUD() {
   static uint8_t srcOf[32];
   uint8_t nDisp = 0;
   for (uint8_t i = 0; i < tama.nLines && nDisp < 32; i++) {
-    uint8_t got = wrapInto(tama.lines[i], &disp[nDisp], 32 - nDisp, WIDTH);
+    uint8_t got = wrapIntoCenteredWords(tama.lines[i], &disp[nDisp], 32 - nDisp, MAX_PX);
     for (uint8_t j = 0; j < got; j++) srcOf[nDisp + j] = i;
     nDisp += got;
   }
@@ -982,12 +1092,13 @@ void drawHUD() {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(4, H - AREA + 2 + i * LH);
-    spr.print(disp[row]);
+    spr.drawString(disp[row], W / 2, TOP + 8 + i * LH);
   }
+  spr.setTextDatum(TL_DATUM);
   if (msgScroll > 0) {
+    spr.setTextSize(1);
     spr.setTextColor(p.body, p.bg);
-    spr.setCursor(W - 18, H - LH - 2);
+    spr.setCursor(W - 22, TOP + AREA - 10);
     spr.printf("-%u", msgScroll);
   }
 }
@@ -1006,17 +1117,20 @@ void setup() {
   statsLoad();
   settingsLoad();
   petNameLoad();
-  buddyInit();
 
   // BLE stays always-on; s.bt is stored as a preference only.
   spr.setColorDepth(16);
   spr.createSprite(W, H);
+  // Load GIF character first (if any), so buddyInit() skips ASCII rendering
+  // when GIF mode is active. Fixes the "buddy appears as ASCII then suddenly
+  // changes to GIF" on boot after a character transfer.
   characterInit(nullptr);
   gifAvailable = characterLoaded();
   // species NVS: 0..N-1 = ASCII species, 0xFF = use GIF (also the default,
   // so a fresh install lands on the GIF). With no GIF installed, 0xFF falls
   // through to buddyInit()'s clamped default.
   buddyMode = !(gifAvailable && speciesIdxLoad() == SPECIES_GIF);
+  buddyInit();
   applyDisplayMode();
 
   {
@@ -1084,13 +1198,8 @@ void loop() {
     if (tama.promptId[0] == 0) {
       // Bridge clear snapshot arrived — allow future prompts normally.
       responseSent = false;
-      lastHandledPromptId[0] = 0;
-    } else if (strcmp(tama.promptId, lastHandledPromptId) == 0) {
-      // Ignore stale replay of a prompt we've already answered.
-      responseSent = true;
-      tama.promptId[0] = 0;
-      tama.promptTool[0] = 0;
-      tama.promptHint[0] = 0;
+      applyDisplayMode();               // 彻底擦除屏幕上的弹窗残影
+      if (buddyMode) buddyInvalidate(); // 强制下一次循环重绘宠物
     } else {
       responseSent = false;
       promptArrivedMs = millis();
@@ -1154,6 +1263,7 @@ void loop() {
         tama.promptId[0] = 0;
         tama.promptTool[0] = 0;
         tama.promptHint[0] = 0;
+        tama.sessionsWaiting = 0;  // sync with UI so derive() stops showing attention
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
         beep(2400, 60);
@@ -1190,9 +1300,10 @@ void loop() {
       lastHandledPromptId[sizeof(lastHandledPromptId)-1] = 0;
       responseSent = true;
       tama.promptId[0] = 0;
-      tama.promptTool[0] = 0;
-      tama.promptHint[0] = 0;
-      statsOnDenial();
+       tama.promptTool[0] = 0;
+       tama.promptHint[0] = 0;
+       tama.sessionsWaiting = 0;  // sync with UI so derive() stops showing attention
+       statsOnDenial();
       beep(600, 60);
     } else if (resetOpen) {
       beep(2400, 30);
@@ -1236,7 +1347,7 @@ void loop() {
   static bool wasClocking = false;
   static bool wasLandscape = false;
   if (clocking != wasClocking || landscapeClock != wasLandscape) {
-    if (clocking && !landscapeClock) characterSetPeek(true);
+    if (clocking && !landscapeClock) characterSetPeek(false);
     else applyDisplayMode();
     characterInvalidate();
     if (buddyMode) buddyInvalidate();
@@ -1244,18 +1355,8 @@ void loop() {
     wasLandscape = landscapeClock;
   }
   if (clocking) {
-    uint8_t dow = clockDow();
-    bool weekend = (dow == 0 || dow == 6);
-    bool friday  = (dow == 5);
-
     uint8_t h = _clkTm.hours;
-    if (h >= 1 && h < 7)             activeState = P_SLEEP;
-    else if (weekend)                activeState = (now/8000 % 6 == 0) ? P_HEART : P_SLEEP;
-    else if (h < 9)                  activeState = (now/6000 % 4 == 0) ? P_IDLE  : P_SLEEP;
-    else if (h == 12)                activeState = (now/5000 % 3 == 0) ? P_HEART : P_IDLE;
-    else if (friday && h >= 15)      activeState = (now/4000 % 3 == 0) ? P_CELEBRATE : P_IDLE;
-    else if (h >= 22 || h == 0)      activeState = (now/7000 % 3 == 0) ? P_DIZZY : P_SLEEP;
-    else                             activeState = (now/10000 % 5 == 0) ? P_SLEEP : P_IDLE;
+    activeState = (h < 8) ? P_SLEEP : P_IDLE;
   }
 
   static uint32_t lastPasskey = 0;
