@@ -43,6 +43,10 @@ model changes for Codex Buddy integration:
   - Codex naming in UI copy
   - Credits page extended with local fork attribution and source block
   - Normal page HUD centering/word-wrap tuning
+- Interactive waiting UX updates:
+  - `input needed` / `choice needed` 进入 `attention` 动画
+  - 非 approval 的 interactive 提示使用独立“双短音”（区别于 approval 单短音）
+  - 同一轮 interactive 仅提示一次，避免连续追问时重复鸣叫
 - GIF runtime behavior fixes:
   - non-sleep single-GIF states (notably `busy`) loop continuously
   - clock page and normal page render-size consistency

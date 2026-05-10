@@ -125,6 +125,25 @@ static void wake() {
   bleSetAdvertising(true);
 }
 bool     responseSent = false;
+bool     interactiveAlertLatched = false;
+
+static bool startsWith(const char* text, const char* prefix) {
+  if (!text || !prefix) return false;
+  size_t n = strlen(prefix);
+  return strncmp(text, prefix, n) == 0;
+}
+
+static bool isInteractiveWaiting(const TamaState& s) {
+  if (s.promptId[0] != 0) return false;
+  if (s.sessionsWaiting == 0) return false;
+  return startsWith(s.msg, "input needed") || startsWith(s.msg, "choice needed");
+}
+
+static void beepInteractiveAlert() {
+  compat::beep(900, 50);
+  delay(40);
+  compat::beep(1200, 50);
+}
 
 struct BatteryUiState {
   bool initialized = false;
@@ -1246,6 +1265,15 @@ void loop() {
       characterInvalidate();
       if (buddyMode) buddyInvalidate();
     }
+  }
+
+  bool interactiveWaitingNow = isInteractiveWaiting(tama);
+  if (interactiveWaitingNow && !interactiveAlertLatched) {
+    wake();
+    beepInteractiveAlert();
+    interactiveAlertLatched = true;
+  } else if (!interactiveWaitingNow) {
+    interactiveAlertLatched = false;
   }
 
   bool inPrompt = promptActive();
