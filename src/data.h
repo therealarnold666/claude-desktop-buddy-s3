@@ -5,6 +5,8 @@
 #include "xfer.h"
 
 struct TamaState {
+  static constexpr uint8_t INTERACTIVE_Q_MAX = 4;
+  static constexpr uint8_t INTERACTIVE_OPT_MAX = 4;
   uint8_t  sessionsTotal;
   uint8_t  sessionsRunning;
   uint8_t  sessionsWaiting;
@@ -19,6 +21,15 @@ struct TamaState {
   char     promptId[40];     // pending permission request ID; empty = no prompt
   char     promptTool[20];
   char     promptHint[44];
+  char     interactiveId[32];
+  char     interactiveCallId[32];
+  char     interactiveTurnId[40];
+  uint8_t  interactiveQuestionCount;
+  char     interactiveQuestionIds[INTERACTIVE_Q_MAX][32];
+  char     interactiveHeaders[INTERACTIVE_Q_MAX][20];
+  char     interactiveQuestions[INTERACTIVE_Q_MAX][92];
+  uint8_t  interactiveOptionCounts[INTERACTIVE_Q_MAX];
+  char     interactiveOptions[INTERACTIVE_Q_MAX][INTERACTIVE_OPT_MAX][64];
 };
 
 // ---------------------------------------------------------------------------
@@ -143,6 +154,58 @@ static void _applyJson(const char* line, TamaState* out) {
     }
   } else {
     out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0;
+  }
+  JsonObject ir = doc["interactive"];
+  if (!ir.isNull()) {
+    const char* iid = ir["id"];
+    const char* callId = ir["call_id"];
+    const char* turnId = ir["turn_id"];
+    strncpy(out->interactiveId, iid ? iid : "", sizeof(out->interactiveId)-1); out->interactiveId[sizeof(out->interactiveId)-1]=0;
+    strncpy(out->interactiveCallId, callId ? callId : "", sizeof(out->interactiveCallId)-1); out->interactiveCallId[sizeof(out->interactiveCallId)-1]=0;
+    strncpy(out->interactiveTurnId, turnId ? turnId : "", sizeof(out->interactiveTurnId)-1); out->interactiveTurnId[sizeof(out->interactiveTurnId)-1]=0;
+    out->interactiveQuestionCount = 0;
+    JsonArray qs = ir["questions"];
+    if (!qs.isNull()) {
+      uint8_t qi = 0;
+      for (JsonVariant qv : qs) {
+        if (qi >= TamaState::INTERACTIVE_Q_MAX) break;
+        JsonObject q = qv.as<JsonObject>();
+        const char* qid = q["id"];
+        const char* hdr = q["header"];
+        const char* txt = q["question"];
+        strncpy(out->interactiveQuestionIds[qi], qid ? qid : "", sizeof(out->interactiveQuestionIds[qi])-1);
+        out->interactiveQuestionIds[qi][sizeof(out->interactiveQuestionIds[qi])-1] = 0;
+        strncpy(out->interactiveHeaders[qi], hdr ? hdr : "", sizeof(out->interactiveHeaders[qi])-1);
+        out->interactiveHeaders[qi][sizeof(out->interactiveHeaders[qi])-1] = 0;
+        strncpy(out->interactiveQuestions[qi], txt ? txt : "", sizeof(out->interactiveQuestions[qi])-1);
+        out->interactiveQuestions[qi][sizeof(out->interactiveQuestions[qi])-1] = 0;
+        out->interactiveOptionCounts[qi] = 0;
+        JsonArray opts = q["options"];
+        if (!opts.isNull()) {
+          uint8_t oi = 0;
+          for (JsonVariant ov : opts) {
+            if (oi >= TamaState::INTERACTIVE_OPT_MAX) break;
+            const char* opt = ov.as<const char*>();
+            strncpy(out->interactiveOptions[qi][oi], opt ? opt : "", sizeof(out->interactiveOptions[qi][oi])-1);
+            out->interactiveOptions[qi][oi][sizeof(out->interactiveOptions[qi][oi])-1] = 0;
+            oi++;
+          }
+          out->interactiveOptionCounts[qi] = oi;
+        }
+        qi++;
+      }
+      out->interactiveQuestionCount = qi;
+    }
+  } else {
+    out->interactiveId[0] = 0; out->interactiveCallId[0] = 0; out->interactiveTurnId[0] = 0;
+    out->interactiveQuestionCount = 0;
+    for (uint8_t qi = 0; qi < TamaState::INTERACTIVE_Q_MAX; qi++) {
+      out->interactiveQuestionIds[qi][0] = 0;
+      out->interactiveHeaders[qi][0] = 0;
+      out->interactiveQuestions[qi][0] = 0;
+      out->interactiveOptionCounts[qi] = 0;
+      for (uint8_t oi = 0; oi < TamaState::INTERACTIVE_OPT_MAX; oi++) out->interactiveOptions[qi][oi][0] = 0;
+    }
   }
   out->lastUpdated = millis();
   _lastLiveMs = millis();

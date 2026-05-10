@@ -63,6 +63,9 @@ bool     swallowBtnA = false;
 bool     swallowBtnB = false;
 bool     buddyMode = false;
 bool     gifAvailable = false;
+uint8_t  interactivePage = 0;
+int8_t   interactiveAnswers[TamaState::INTERACTIVE_Q_MAX] = { -1, -1, -1, -1 };
+char     lastInteractiveId[32] = "";
 const uint8_t SPECIES_GIF = 0xFF;   // species NVS sentinel: use the installed GIF
 
 // Cycle GIF (if installed) → ASCII species 0..N-1 → GIF. Persisted to the
@@ -139,6 +142,54 @@ static bool isInteractiveWaiting(const TamaState& s) {
   return startsWith(s.msg, "input needed") || startsWith(s.msg, "choice needed");
 }
 
+static bool interactiveUiEnabled() {
+  return settings().interactiveQA;
+}
+
+static bool interactiveActive() {
+  return interactiveUiEnabled() && isInteractiveWaiting(tama) && tama.interactiveId[0] != 0 && tama.interactiveQuestionCount > 0;
+}
+
+static uint8_t interactivePageCount() {
+  uint8_t total = 2;
+  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) total += 1 + tama.interactiveOptionCounts[qi];
+  return total;
+}
+
+static int interactivePageForQuestion(uint8_t page, uint8_t* questionIndex, int8_t* optionIndex) {
+  if (page == 0) { *questionIndex = 0; *optionIndex = -1; return 0; }
+  if (page == 1) { *questionIndex = 0; *optionIndex = -1; return 1; }
+  uint8_t cursor = 2;
+  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) {
+    if (page == cursor) { *questionIndex = qi; *optionIndex = -1; return 1; }
+    cursor++;
+    for (uint8_t oi = 0; oi < tama.interactiveOptionCounts[qi]; oi++, cursor++) {
+      if (page == cursor) { *questionIndex = qi; *optionIndex = oi; return 2; }
+    }
+  }
+  *questionIndex = 0; *optionIndex = -1;
+  return 0;
+}
+
+static void resetInteractiveAnswers() {
+  for (uint8_t i = 0; i < TamaState::INTERACTIVE_Q_MAX; i++) interactiveAnswers[i] = -1;
+  interactivePage = 0;
+}
+
+static uint8_t interactiveFirstUnansweredQuestion() {
+  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) {
+    if (interactiveAnswers[qi] < 0) return qi;
+  }
+  return tama.interactiveQuestionCount;
+}
+
+static void interactiveJumpToQuestion(uint8_t questionIndex) {
+  if (questionIndex >= tama.interactiveQuestionCount) return;
+  uint8_t page = 2;
+  for (uint8_t qi = 0; qi < questionIndex; qi++) page += 1 + tama.interactiveOptionCounts[qi];
+  interactivePage = page;
+}
+
 static void beepInteractiveAlert() {
   compat::beep(900, 50);
   delay(40);
@@ -190,6 +241,16 @@ static void sendCmd(const char* json) {
   bleWrite((const uint8_t*)json, n);
   bleWrite((const uint8_t*)"\n", 1);
 }
+
+static void sendInteractiveSelection() {
+  char cmd[192];
+  int pos = snprintf(cmd, sizeof(cmd), "{\"cmd\":\"interactive_select\",\"id\":\"%s\",\"answers\":[", tama.interactiveId);
+  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount && pos < (int)sizeof(cmd) - 8; qi++) {
+    pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, "%s%d", qi ? "," : "", (int)interactiveAnswers[qi]);
+  }
+  snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, "]}");
+  sendCmd(cmd);
+}
 const uint8_t INFO_PAGES = 6;
 const uint8_t INFO_PG_BUTTONS = 2;
 const uint8_t INFO_PG_CREDITS = 5;
@@ -211,8 +272,8 @@ const uint8_t MENU_N = 6;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
-const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "clock rot", "ascii pet", "reset", "back" };
-const uint8_t SETTINGS_N = 10;
+const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "interactive qa", "clock rot", "ascii pet", "reset", "back" };
+const uint8_t SETTINGS_N = 11;
 
 bool    resetOpen = false;
 uint8_t resetSel  = 0;
@@ -239,10 +300,11 @@ static void applySetting(uint8_t idx) {
     case 3: s.wifi = !s.wifi; break;   // stored only — no WiFi stack linked
     case 4: s.led = !s.led; break;
     case 5: s.hud = !s.hud; break;
-    case 6: s.clockRot = (s.clockRot + 1) % 3; break;
-    case 7: nextPet(); return;
-    case 8: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
-    case 9: settingsOpen = false; characterInvalidate(); return;
+    case 6: s.interactiveQA = !s.interactiveQA; break;
+    case 7: s.clockRot = (s.clockRot + 1) % 3; break;
+    case 8: nextPet(); return;
+    case 9: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
+    case 10: settingsOpen = false; characterInvalidate(); return;
   }
   settingsSave();
 }
@@ -328,7 +390,7 @@ static void drawSettings() {
   spr.drawRoundRect(mx, my, mw, mh, 4, p.textDim);
   spr.setTextSize(1);
   Settings& s = settings();
-  bool vals[] = { s.sound, s.bt, s.wifi, s.led, s.hud };
+  bool vals[] = { s.sound, s.bt, s.wifi, s.led, s.hud, s.interactiveQA };
   for (int i = 0; i < SETTINGS_N; i++) {
     bool sel = (i == settingsSel);
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
@@ -339,13 +401,13 @@ static void drawSettings() {
     spr.setTextColor(p.textDim, PANEL);
     if (i == 0) {
       spr.printf("%u/4", brightLevel);
-    } else if (i >= 1 && i <= 5) {
+    } else if (i >= 1 && i <= 6) {
       spr.setTextColor(vals[i-1] ? GREEN : p.textDim, PANEL);
       spr.print(vals[i-1] ? " on" : "off");
-    } else if (i == 6) {
+    } else if (i == 7) {
       static const char* const RN[] = { "auto", "port", "land" };
       spr.print(RN[s.clockRot]);
-    } else if (i == 7) {
+    } else if (i == 8) {
       uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
       uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
       spr.printf("%u/%u", pos, total);
@@ -958,6 +1020,73 @@ static void drawApproval() {
   }
 }
 
+static void drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color) {
+  char lines[8][24];
+  uint8_t rows = wrapIntoCenteredWords(text ? text : "", lines, maxRows, 118);
+  spr.setTextColor(color, characterPalette().bg);
+  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], W / 2, topY + i * 16);
+}
+
+static void drawInteractive() {
+  const Palette& p = characterPalette();
+  const int AREA = 92;
+  uint8_t totalPages = interactivePageCount();
+  if (interactivePage >= totalPages) interactivePage = 0;
+
+  spr.fillRect(0, H - AREA, W, AREA, p.bg);
+  spr.drawFastHLine(0, H - AREA, W, p.textDim);
+  spr.setTextSize(1);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.setCursor(4, H - AREA + 4);
+  spr.print("input needed");
+  spr.setCursor(W - 30, H - AREA + 4);
+  spr.printf("%u/%u", interactivePage + 1, totalPages);
+
+  spr.setTextSize(2);
+  spr.setTextDatum(MC_DATUM);
+
+  if (interactivePage == 0) {
+    spr.setTextColor(p.text, p.bg);
+    spr.drawString("extra input", W / 2, H - AREA + 26);
+    spr.setTextSize(1);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("B: next page", W / 2, H - AREA + 50);
+    spr.drawString("A: continue", W / 2, H - AREA + 64);
+    spr.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  uint8_t questionIndex = 0;
+  int8_t optionIndex = -1;
+  int pageType = interactivePageForQuestion(interactivePage, &questionIndex, &optionIndex);
+  if (pageType == 1) {
+    spr.setTextSize(1);
+    spr.setTextColor(p.body, p.bg);
+    spr.drawString(tama.interactiveHeaders[questionIndex], W / 2, H - AREA + 18);
+    drawCenteredWrappedBlock(tama.interactiveQuestions[questionIndex], H - AREA + 34, 3, p.text);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("A/B: next", W / 2, H - 12);
+    spr.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  if (pageType == 2) {
+    spr.setTextSize(1);
+    spr.setTextColor(p.body, p.bg);
+    char head[40];
+    snprintf(head, sizeof(head), "%s %u/%u", tama.interactiveHeaders[questionIndex], questionIndex + 1, tama.interactiveQuestionCount);
+    spr.drawString(head, W / 2, H - AREA + 18);
+    drawCenteredWrappedBlock(tama.interactiveOptions[questionIndex][optionIndex], H - AREA + 34, 2, p.text);
+    spr.setTextColor(p.textDim, p.bg);
+    if (interactiveAnswers[questionIndex] == optionIndex) spr.drawString("selected", W / 2, H - 24);
+    spr.drawString("B: next  A: choose", W / 2, H - 12);
+    spr.setTextDatum(TL_DATUM);
+    return;
+  }
+
+  spr.setTextDatum(TL_DATUM);
+}
+
 static void tinyHeart(int x, int y, bool filled, uint16_t col) {
   if (filled) {
     spr.fillCircle(x - 2, y, 2, col);
@@ -1084,6 +1213,7 @@ static bool promptActive() {
 
 void drawHUD() {
   if (promptActive()) { drawApproval(); return; }
+  if (interactiveActive()) { drawInteractive(); return; }
   const Palette& p = characterPalette();
   const int SHOW = 2, LH = 16, MAX_PX = 118;
   const int AREA = SHOW * LH + 10;
@@ -1276,7 +1406,22 @@ void loop() {
     interactiveAlertLatched = false;
   }
 
+  if (strcmp(tama.interactiveId, lastInteractiveId) != 0) {
+    strncpy(lastInteractiveId, tama.interactiveId, sizeof(lastInteractiveId)-1);
+    lastInteractiveId[sizeof(lastInteractiveId)-1] = 0;
+    resetInteractiveAnswers();
+    if (tama.interactiveId[0] != 0 && interactiveUiEnabled()) {
+      wake();
+      displayMode = DISP_NORMAL;
+      menuOpen = settingsOpen = resetOpen = false;
+      applyDisplayMode();
+      characterInvalidate();
+      if (buddyMode) buddyInvalidate();
+    }
+  }
+
   bool inPrompt = promptActive();
+  bool inInteractive = interactiveActive();
 
   // Button-press wake. Track which button woke the screen so its full
   // press cycle (including long-press) is swallowed — you don't want
@@ -1335,6 +1480,27 @@ void loop() {
         statsOnApproval(tookS);
         beep(2400, 60);
         if (tookS < 5) triggerOneShot(P_HEART, 2000);
+      } else if (inInteractive) {
+        uint8_t qIndex = 0;
+        int8_t oIndex = -1;
+        int pageType = interactivePageForQuestion(interactivePage, &qIndex, &oIndex);
+        if (interactivePage == 0 || pageType == 1) {
+          beep(1800, 30);
+          interactivePage = (interactivePage + 1) % interactivePageCount();
+        } else if (pageType == 2 && oIndex >= 0) {
+          beep(2400, 40);
+          interactiveAnswers[qIndex] = oIndex;
+          uint8_t nextQuestion = interactiveFirstUnansweredQuestion();
+          if (nextQuestion >= tama.interactiveQuestionCount) {
+            sendInteractiveSelection();
+            tama.interactiveId[0] = 0;
+            tama.interactiveQuestionCount = 0;
+            tama.sessionsWaiting = 0;
+            interactiveAlertLatched = false;
+          } else {
+            interactiveJumpToQuestion(nextQuestion);
+          }
+        }
       } else if (resetOpen) {
         beep(1800, 30);
         resetSel = (resetSel + 1) % RESET_N;
@@ -1376,6 +1542,9 @@ void loop() {
        tama.sessionsWaiting = 0;  // sync with UI so derive() stops showing attention
        statsOnDenial();
       beep(600, 60);
+    } else if (inInteractive) {
+      beep(2400, 30);
+      interactivePage = (interactivePage + 1) % interactivePageCount();
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
@@ -1416,7 +1585,7 @@ void loop() {
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
   bool clocking = displayMode == DISP_NORMAL
-               && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
+               && !menuOpen && !settingsOpen && !resetOpen && !inPrompt && !inInteractive
                && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
                && dataRtcValid() && _onUsb;
   if (clocking) clockUpdateOrient();
