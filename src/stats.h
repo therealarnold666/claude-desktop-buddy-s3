@@ -138,6 +138,8 @@ inline uint8_t statsMoodTier() {
 // full when the buddy wakes, then it drains 1 tier per 2h.
 static uint32_t _lastWakeMs = 0;
 static uint8_t  _energyAtWake  = 3;
+static uint32_t _usbIdleRecoverStartMs = 0;
+static uint8_t  _usbIdleRecoveredSteps = 0;
 
 inline void statsOnWake() { _lastWakeMs = millis(); _energyAtWake = 5; }
 
@@ -146,6 +148,42 @@ inline uint8_t statsEnergyTier() {
   int8_t e = (int8_t)_energyAtWake - (int8_t)(hoursSince / 2);
   if (e < 0) e = 0; if (e > 5) e = 5;
   return (uint8_t)e;
+}
+
+inline void statsResetUsbIdleRecovery() {
+  _usbIdleRecoverStartMs = 0;
+  _usbIdleRecoveredSteps = 0;
+}
+
+inline bool statsPollUsbIdleRecovery(bool active) {
+  if (!active) {
+    statsResetUsbIdleRecovery();
+    return false;
+  }
+
+  uint32_t now = millis();
+  if (_usbIdleRecoverStartMs == 0) {
+    _usbIdleRecoverStartMs = now;
+    _usbIdleRecoveredSteps = 0;
+    return false;
+  }
+
+  uint32_t elapsed = now - _usbIdleRecoverStartMs;
+  uint8_t expectedSteps = (uint8_t)(elapsed / 3600000UL);
+  if (expectedSteps <= _usbIdleRecoveredSteps) return false;
+
+  uint8_t current = statsEnergyTier();
+  if (current >= 5) {
+    _usbIdleRecoveredSteps = expectedSteps;
+    return false;
+  }
+
+  uint8_t next = current + 1;
+  if (next > 5) next = 5;
+  _lastWakeMs = now;
+  _energyAtWake = next;
+  _usbIdleRecoveredSteps++;
+  return true;
 }
 
 inline uint8_t statsFedProgress() {

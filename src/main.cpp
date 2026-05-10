@@ -83,9 +83,20 @@ static void nextPet() {
   if (buddyMode) buddyInvalidate();
 }
 uint32_t wakeTransitionUntil = 0;
+uint32_t comboPressStartMs = 0;
+bool     comboScreenHandled = false;
 const uint32_t SCREEN_OFF_MS = 30000;
 const uint32_t USB_IDLE_SLEEP_MS = 30UL * 60UL * 1000UL;
 const uint32_t ENERGY_RESTORE_SLEEP_MS = 30UL * 60UL * 1000UL;
+const uint32_t IDLE_SCREEN_OFF_MS = 30000;
+const uint32_t BUSY_DIM_MS = 30000;
+const uint32_t SLEEP_SCREEN_OFF_MS = 10000;
+const uint32_t SHORT_DUTY_WINDOW_MS = 5UL * 60UL * 1000UL;
+const uint32_t SHORT_ADV_ON_MS = 5000;
+const uint32_t SHORT_ADV_PERIOD_MS = 10000;
+const uint32_t LONG_ADV_ON_MS = 5000;
+const uint32_t LONG_ADV_PERIOD_MS = 60000;
+const uint8_t  MIN_VISIBLE_BRIGHTNESS = 8;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
@@ -93,12 +104,11 @@ uint32_t promptArrivedMs = 0;
 uint32_t idleStartedMs = 0;
 bool     sleepStateActive = true;
 uint32_t sleepStateStartedMs = 0;
+PersonaState lastBaseState = P_SLEEP;
 
-// Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
+// IMU-backed face-down nap is disabled for the Codex buddy build.
 static bool isFaceDown() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  return az < -0.7f && fabsf(ax) < 0.4f && fabsf(ay) < 0.4f;
+  return false;
 }
 
 static void applyBrightness() { compat::setScreenBrightness0_100(20 + brightLevel * 20); }
@@ -112,6 +122,7 @@ static void wake() {
     wakeTransitionUntil = millis() + 12000;
   }
   if (dimmed) { applyBrightness(); dimmed = false; }
+  bleSetAdvertising(true);
 }
 bool     responseSent = false;
 
@@ -150,7 +161,8 @@ static void sampleBatteryUi(uint32_t now) {
 }
 
 static void beep(uint16_t freq, uint16_t dur) {
-  if (settings().sound) compat::beep(freq, dur);
+  if (!settings().sound) return;
+  compat::beep(freq, dur);
 }
 
 static void sendCmd(const char* json) {
@@ -418,49 +430,14 @@ static void clockRefreshRtc() {
   }
 }
 
-// Hardware mounting makes +ax correspond to the opposite landscape
-// rotation from what users expect while holding the stick.
 static uint8_t _orientFromAx(float ax) {
   return (ax >= 0) ? 3 : 1;
 }
 
 static void clockUpdateOrient() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  uint8_t lock = settings().clockRot;
-  if (lock == 1) { clockOrient = 0; return; }
-  if (lock == 2) {
-    // Locked landscape: never drop to 0, but still pick 1 vs 3 from
-    // gravity so the cradle works either way up. Need a strong tilt
-    // for the 1↔3 swap so handling jitter doesn't flip it; otherwise
-    // hold whatever we last had (or 1 from boot).
-    if (clockOrient == 0) clockOrient = _orientFromAx(ax);
-    if      (ax >  0.5f && clockOrient != 3) clockOrient = 3;
-    else if (ax < -0.5f && clockOrient != 1) clockOrient = 1;
-    return;
-  }
-  // Dual threshold: strict to enter (must be clearly sideways), loose to
-  // stay (tolerate ~65° of tilt). With one shared threshold a slight lean
-  // while sitting on the long edge puts ax right at the boundary and the
-  // counter ratchets down in ~half a second.
-  bool side = (clockOrient == 0)
-    ? fabsf(ax) > 0.7f && fabsf(ay) < 0.5f && fabsf(az) < 0.5f
-    : fabsf(ax) > 0.4f;
-  if (side) { if (orientFrames < 20) orientFrames++; }
-  else      { if (orientFrames > -10) orientFrames--; }
-  if (clockOrient == 0 && orientFrames >= 15) {
-    clockOrient = _orientFromAx(ax);
-  } else if (clockOrient != 0 && orientFrames <= -8) {
-    clockOrient = 0;
-  } else if (clockOrient != 0 && side) {
-    // Direct 1↔3: a fast flip keeps |ax|>0.7 (just changes sign), so
-    // `side` never drops and the exit-via-0 path can't fire. Watch for
-    // ax sign disagreeing with the stored orientation.
-    static int8_t swapFrames = 0;
-    uint8_t want = _orientFromAx(ax);
-    if (want != clockOrient) { if (++swapFrames >= 8) { clockOrient = want; swapFrames = 0; } }
-    else swapFrames = 0;
-  }
+  // IMU-backed clock auto-rotation is disabled. Keep the clock in portrait.
+  clockOrient = 0;
+  orientFrames = 0;
 }
 
 // Clock face: shown when charging on USB with nothing else going on.
@@ -583,12 +560,7 @@ void triggerOneShot(PersonaState s, uint32_t durMs) {
 }
 
 bool checkShake() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  float mag = sqrtf(ax*ax + ay*ay + az*az);
-  float delta = fabsf(mag - accelBaseline);
-  accelBaseline = accelBaseline * 0.95f + mag * 0.05f;
-  return delta > 0.8f;
+  return false;
 }
 
 
@@ -816,13 +788,23 @@ void drawInfo() {
     y += 4;
     spr.setTextColor(p.text, p.bg);
     ln("Felix Rieseberg");
+    y += 8;
+    spr.setTextColor(p.textDim, p.bg);
+    ln("mod by");
+    y += 4;
+    spr.setTextColor(p.text, p.bg);
+    ln("arnoldn");
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("source");
     y += 4;
     spr.setTextColor(p.text, p.bg);
-    ln("github.com/anthropics");
-    ln("/codex-buddy");
+    ln("cd /home/arnold/Projects");
+    ln("/codex-buddy/claude-des");
+    ln("ktop-buddy-s3");
+    ln("./.venv/bin/python3 -m");
+    ln(" platformio run -t");
+    ln(" upload");
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
@@ -1144,6 +1126,9 @@ void drawHUD() {
 
 void setup() {
   auto cfg = M5.config();
+  cfg.output_power = false;   // No external 5V accessories in this project.
+  cfg.internal_imu = false;   // IMU-driven shake/flip/rotation logic is disabled.
+  cfg.internal_mic = false;   // Mic is unused; skip its I2S init and bias power.
   M5.begin(cfg);
   M5.Display.setRotation(0);
   M5.Speaker.begin();
@@ -1206,6 +1191,7 @@ void loop() {
   dataPoll(&tama);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
+  if (baseState == P_BUSY && lastBaseState != P_BUSY) wake();
   if (baseState == P_IDLE) {
     if (idleStartedMs == 0) idleStartedMs = now;
   } else {
@@ -1218,8 +1204,10 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
-  // LED: pulse on attention, otherwise off
-  if (activeState == P_ATTENTION && settings().led) {
+  // Red status LED is only useful while the screen is visible. Turn it off
+  // during screen-off and face-down nap so it does not waste power in
+  // "sleeping" states.
+  if (!screenOff && !napping && activeState == P_ATTENTION && settings().led) {
     digitalWrite(LED_PIN, (now / 400) % 2 ? LOW : HIGH);
   } else {
     digitalWrite(LED_PIN, HIGH);
@@ -1273,18 +1261,24 @@ void loop() {
     wake();
   }
 
-  // Power button (left side): short-press toggles screen off.
-  // Long-press (6s) still powers off via hardware on supported boards.
-  if (M5.BtnPWR.wasClicked()) {
-    if (screenOff) {
-      wake();
-    } else {
+  // StickS3's side button is a PMIC power/reset key in hardware, not a safe
+  // general-purpose UI key. Use an A+B chord for manual screen-off instead.
+  if (M5.BtnA.isPressed() && M5.BtnB.isPressed()) {
+    if (comboPressStartMs == 0) comboPressStartMs = now;
+    if (!screenOff && !comboScreenHandled && (now - comboPressStartMs) >= 350) {
       compat::screenPower(false);
       screenOff = true;
+      if (dimmed) dimmed = false;
+      swallowBtnA = true;
+      swallowBtnB = true;
+      comboScreenHandled = true;
     }
+  } else {
+    comboPressStartMs = 0;
+    comboScreenHandled = false;
   }
 
-  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA) {
+  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA && !M5.BtnB.isPressed()) {
     btnALong = true;
     beep(800, 60);
     if (resetOpen) { resetOpen = false; }
@@ -1333,9 +1327,13 @@ void loop() {
     swallowBtnA = false;
   }
 
-  // BtnB: pet → heart
+  // BtnB: prompt/settings/info/pet keep their existing actions.
+  // On the normal page, B is reserved for manual screen-off.
   if (M5.BtnB.wasPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
+    else if (M5.BtnA.isPressed()) {
+      // A+B is reserved for manual screen-off.
+    }
     else
     if (inPrompt) {
       char cmd[96];
@@ -1366,9 +1364,13 @@ void loop() {
       beep(2400, 30);
       petPage = (petPage + 1) % PET_PAGES;
       applyDisplayMode();
+    } else if (displayMode == DISP_NORMAL) {
+      compat::screenPower(false);
+      screenOff = true;
+      if (dimmed) dimmed = false;
+      swallowBtnB = true;
     } else {
       beep(2400, 30);
-      msgScroll = (msgScroll >= 30) ? 0 : msgScroll + 1;
     }
   }
 
@@ -1380,6 +1382,8 @@ void loop() {
   // applyDisplayMode() so the next mode-switch isn't visually offset.
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
   bool usbIdleSleep = _onUsb && idleStartedMs != 0 && (now - idleStartedMs) >= USB_IDLE_SLEEP_MS;
+  bool usbIdleRecover = _onUsb && baseState == P_IDLE && idleStartedMs != 0 && !inPrompt;
+  statsPollUsbIdleRecovery(usbIdleRecover);
   if (baseState == P_IDLE && usbIdleSleep) baseState = P_SLEEP;
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
@@ -1487,14 +1491,56 @@ void loop() {
     wake();
   }
 
-  // millis() not the cached `now`: wake() runs after `now` is captured,
-  // so now - lastInteractMs underflows when a button is held → flicker.
-  // No auto-off on USB power — clock face wants to stay visible while charging.
-  if (!screenOff && !inPrompt && !_onUsb
-      && millis() - lastInteractMs > SCREEN_OFF_MS) {
-    compat::screenPower(false);
-    screenOff = true;
+  // Battery-only display power policy:
+  // - idle: 30s inactivity -> screen off
+  // - busy / approval: 30s inactivity -> minimum visible brightness
+  // - sleep: 10s inactivity -> screen off
+  // USB power disables all automatic dim/off behavior.
+  if (!_onUsb) {
+    uint32_t inactiveMs = millis() - lastInteractMs;
+    bool wantsDim = false;
+    bool wantsOff = false;
+
+    if (inPrompt || activeState == P_BUSY || activeState == P_ATTENTION) {
+      wantsDim = inactiveMs >= BUSY_DIM_MS;
+    } else if (baseState == P_IDLE) {
+      wantsOff = inactiveMs >= IDLE_SCREEN_OFF_MS;
+    } else if (baseState == P_SLEEP) {
+      wantsOff = inactiveMs >= SLEEP_SCREEN_OFF_MS;
+    }
+
+    if (!screenOff && wantsOff) {
+      compat::screenPower(false);
+      screenOff = true;
+      if (dimmed) dimmed = false;
+    } else if (!screenOff && wantsDim) {
+      if (!dimmed) {
+        compat::setScreenBrightness0_100(MIN_VISIBLE_BRIGHTNESS);
+        dimmed = true;
+      }
+    } else if (!screenOff && dimmed) {
+      applyBrightness();
+      dimmed = false;
+    }
+  } else if (!screenOff && dimmed) {
+    applyBrightness();
+    dimmed = false;
   }
 
-  delay(screenOff ? 100 : 16);
+  bool wantsAdvertising = true;
+  if (!_onUsb && screenOff && !bleConnected()) {
+    uint32_t inactiveMs = millis() - lastInteractMs;
+    uint32_t periodMs = SHORT_ADV_PERIOD_MS;
+    uint32_t onMs = SHORT_ADV_ON_MS;
+    if (inactiveMs >= SHORT_DUTY_WINDOW_MS) {
+      periodMs = LONG_ADV_PERIOD_MS;
+      onMs = LONG_ADV_ON_MS;
+    }
+    wantsAdvertising = (inactiveMs % periodMs) < onMs;
+  }
+  bleSetAdvertising(wantsAdvertising);
+
+  lastBaseState = baseState;
+
+  delay(screenOff ? 200 : 16);
 }
