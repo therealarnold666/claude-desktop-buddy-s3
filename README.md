@@ -21,6 +21,31 @@
 > first flash, `ARDUINO_USB_CDC_ON_BOOT=1` usually lets subsequent uploads
 > reset into download mode automatically.
 
+## Additional Delta In This Branch
+
+Beyond the baseline S3 port, this branch also includes behavior and power
+model changes for Codex Buddy integration:
+
+- Session/turn-driven state UX alignment with `codex-buddy-bridge`
+  (`running/waiting/idle/sleep` transitions tuned for short BLE connects).
+- Display/power policy updates:
+  - battery-only auto off/dim rules by state
+  - screen-off loop throttled for lower idle draw
+  - BLE advertising duty-cycle in screen-off battery mode
+- UI/wording updates:
+  - Codex naming in UI copy
+  - Credits page extended with local fork attribution and source block
+  - Normal page HUD centering/word-wrap tuning
+- GIF runtime behavior fixes:
+  - non-sleep single-GIF states (notably `busy`) loop continuously
+  - clock page and normal page render-size consistency
+- Stats model updates:
+  - token deltas accumulate from bridge and persist locally
+  - energy restore rules include long sleep and USB+idle recovery behavior
+- Hardware-path adjustments for this project profile:
+  - IMU-facing logic disabled in current branch build
+  - side power key no longer used as app-level screen-toggle control
+
 ### Running on a StickS3
 
 <p align="center">

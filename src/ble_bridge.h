@@ -15,6 +15,8 @@
 // snapshots) are written via bleWrite() and chunked to the negotiated MTU.
 
 void bleInit(const char* deviceName);
+void bleSetAdvertising(bool on);
+bool bleAdvertising();
 bool bleConnected();
 // True once LE Secure Connections bonding has completed for the current
 // link. The NUS characteristics are encrypted-only, so in practice this

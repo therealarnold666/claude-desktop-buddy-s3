@@ -27,6 +27,7 @@ static BLECharacteristic* txChar = nullptr;
 static BLECharacteristic* rxChar = nullptr;
 static volatile bool      connected = false;
 static volatile bool      secure = false;
+static volatile bool      advertising = false;
 static volatile uint32_t  passkey = 0;
 static volatile uint16_t  mtu = 23;
 
@@ -49,6 +50,7 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* s) override {
     connected = true;
+    advertising = false;
     Serial.println("[ble] connected");
   }
   void onDisconnect(BLEServer* s) override {
@@ -56,9 +58,8 @@ class ServerCallbacks : public BLEServerCallbacks {
     secure = false;
     passkey = 0;
     mtu = 23;
+    advertising = false;
     Serial.println("[ble] disconnected");
-    // Restart advertising so the next client can find us.
-    BLEDevice::startAdvertising();
   }
   void onMtuChanged(BLEServer*, esp_ble_gatts_cb_param_t* param) override {
     mtu = param->mtu.mtu;
@@ -130,9 +131,22 @@ void bleInit(const char* deviceName) {
   adv->setMinPreferred(0x06);   // iOS-friendly connection interval
   adv->setMaxPreferred(0x12);
   BLEDevice::startAdvertising();
+  advertising = true;
   Serial.printf("[ble] advertising as '%s'\n", deviceName);
 }
 
+void bleSetAdvertising(bool on) {
+  if (connected || server == nullptr) return;
+  if (advertising == on) return;
+  if (on) {
+    BLEDevice::startAdvertising();
+  } else {
+    BLEDevice::stopAdvertising();
+  }
+  advertising = on;
+}
+
+bool bleAdvertising() { return advertising; }
 bool bleConnected() { return connected; }
 bool bleSecure()    { return secure; }
 uint32_t blePasskey() { return passkey; }

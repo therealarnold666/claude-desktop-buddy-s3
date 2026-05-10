@@ -24,12 +24,13 @@ struct TamaState {
 // ---------------------------------------------------------------------------
 // Three modes, checked in priority order:
 //   demo   → auto-cycle fake scenarios every 8s, ignore live data
-//   live   → JSON arrived in the last 10s over USB or BT
-//   asleep → no data, all zeros, "No Claude connected"
+//   live   → host has pushed JSON recently enough to count as connected
+//   asleep → no data, all zeros, "No Codex connected"
 // ---------------------------------------------------------------------------
 
 static uint32_t _lastLiveMs = 0;
 static uint32_t _lastBtByteMs = 0;   // hasClient() lies; track actual BT traffic
+static constexpr uint32_t LIVE_TIMEOUT_MS = 20UL * 60UL * 1000UL;
 static bool     _demoMode   = false;
 static uint8_t  _demoIdx    = 0;
 static uint32_t _demoNext   = 0;
@@ -48,7 +49,7 @@ inline void dataSetDemo(bool on) {
 inline bool dataDemo() { return _demoMode; }
 
 inline bool dataConnected() {
-  return _lastLiveMs != 0 && (millis() - _lastLiveMs) <= 30000;
+  return _lastLiveMs != 0 && (millis() - _lastLiveMs) <= LIVE_TIMEOUT_MS;
 }
 
 inline bool dataBtActive() {
@@ -96,9 +97,16 @@ static void _applyJson(const char* line, TamaState* out) {
     return;
   }
 
-  out->sessionsTotal     = doc["total"]     | out->sessionsTotal;
-  out->sessionsRunning   = doc["running"]   | out->sessionsRunning;
-  out->sessionsWaiting   = doc["waiting"]   | out->sessionsWaiting;
+  // 解析状态快照
+  if (!doc["total"].isNull() || !doc["msg"].isNull() || !doc["waiting"].isNull() || !doc["running"].isNull() || !doc["prompt"].isNull()) {
+    // 如果宿主机没有下发 total 和 running，保留屏幕上的现有数字（恢复记忆功能）
+    if (!doc["total"].isNull())   out->sessionsTotal   = doc["total"].as<uint8_t>();
+    if (!doc["running"].isNull()) out->sessionsRunning = doc["running"].as<uint8_t>();
+    
+    // waiting 仍保持强制同步，防止弹窗状态卡死
+    out->sessionsWaiting = doc["waiting"] | 0;
+  }
+
   out->recentlyCompleted = doc["completed"] | false;
   uint32_t bridgeTokens = doc["tokens"] | 0;
   if (doc["tokens"].is<uint32_t>()) statsOnBridgeTokens(bridgeTokens);
@@ -122,9 +130,17 @@ static void _applyJson(const char* line, TamaState* out) {
   JsonObject pr = doc["prompt"];
   if (!pr.isNull()) {
     const char* pid = pr["id"]; const char* pt = pr["tool"]; const char* ph = pr["hint"];
-    strncpy(out->promptId,   pid ? pid : "", sizeof(out->promptId)-1);   out->promptId[sizeof(out->promptId)-1]=0;
-    strncpy(out->promptTool, pt  ? pt  : "", sizeof(out->promptTool)-1); out->promptTool[sizeof(out->promptTool)-1]=0;
-    strncpy(out->promptHint, ph  ? ph  : "", sizeof(out->promptHint)-1); out->promptHint[sizeof(out->promptHint)-1]=0;
+    
+    extern char lastHandledPromptId[40];
+    if (pid && lastHandledPromptId[0] != 0 && strcmp(pid, lastHandledPromptId) == 0) {
+      // 如果这是刚刚才审批过的旧包，直接在解析层丢弃它，防止污染主循环状态机
+      out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0;
+      out->sessionsWaiting = 0; 
+    } else {
+      strncpy(out->promptId,   pid ? pid : "", sizeof(out->promptId)-1);   out->promptId[sizeof(out->promptId)-1]=0;
+      strncpy(out->promptTool, pt  ? pt  : "", sizeof(out->promptTool)-1); out->promptTool[sizeof(out->promptTool)-1]=0;
+      strncpy(out->promptHint, ph  ? ph  : "", sizeof(out->promptHint)-1); out->promptHint[sizeof(out->promptHint)-1]=0;
+    }
   } else {
     out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0;
   }
@@ -186,7 +202,7 @@ inline void dataPoll(TamaState* out) {
   if (!out->connected) {
     out->sessionsTotal=0; out->sessionsRunning=0; out->sessionsWaiting=0;
     out->recentlyCompleted=false; out->lastUpdated=now;
-    strncpy(out->msg, "No Claude connected", sizeof(out->msg)-1);
+    strncpy(out->msg, "No Codex connected", sizeof(out->msg)-1);
     out->msg[sizeof(out->msg)-1]=0;
   }
 }

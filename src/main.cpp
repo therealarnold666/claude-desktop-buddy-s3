@@ -83,17 +83,32 @@ static void nextPet() {
   if (buddyMode) buddyInvalidate();
 }
 uint32_t wakeTransitionUntil = 0;
+uint32_t comboPressStartMs = 0;
+bool     comboScreenHandled = false;
 const uint32_t SCREEN_OFF_MS = 30000;
+const uint32_t USB_IDLE_SLEEP_MS = 30UL * 60UL * 1000UL;
+const uint32_t ENERGY_RESTORE_SLEEP_MS = 30UL * 60UL * 1000UL;
+const uint32_t IDLE_SCREEN_OFF_MS = 30000;
+const uint32_t BUSY_DIM_MS = 30000;
+const uint32_t SLEEP_SCREEN_OFF_MS = 10000;
+const uint32_t SHORT_DUTY_WINDOW_MS = 5UL * 60UL * 1000UL;
+const uint32_t SHORT_ADV_ON_MS = 5000;
+const uint32_t SHORT_ADV_PERIOD_MS = 10000;
+const uint32_t LONG_ADV_ON_MS = 5000;
+const uint32_t LONG_ADV_PERIOD_MS = 60000;
+const uint8_t  MIN_VISIBLE_BRIGHTNESS = 8;
 
 bool     napping = false;
 uint32_t napStartMs = 0;
 uint32_t promptArrivedMs = 0;
+uint32_t idleStartedMs = 0;
+bool     sleepStateActive = true;
+uint32_t sleepStateStartedMs = 0;
+PersonaState lastBaseState = P_SLEEP;
 
-// Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
+// IMU-backed face-down nap is disabled for the Codex buddy build.
 static bool isFaceDown() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  return az < -0.7f && fabsf(ax) < 0.4f && fabsf(ay) < 0.4f;
+  return false;
 }
 
 static void applyBrightness() { compat::setScreenBrightness0_100(20 + brightLevel * 20); }
@@ -107,11 +122,47 @@ static void wake() {
     wakeTransitionUntil = millis() + 12000;
   }
   if (dimmed) { applyBrightness(); dimmed = false; }
+  bleSetAdvertising(true);
 }
 bool     responseSent = false;
 
+struct BatteryUiState {
+  bool initialized = false;
+  uint32_t lastSampleMs = 0;
+  int filteredBatMv = 0;
+  int filteredCurrentMa = 0;
+  int filteredVbusMv = 0;
+};
+
+static BatteryUiState batteryUi;
+
+static void sampleBatteryUi(uint32_t now) {
+  int rawBatMv = (int)(compat::batVoltageV() * 1000);
+  int rawCurrentMa = (int)compat::batCurrentMA();
+  int rawVbusMv = (int)(compat::vbusVoltageV() * 1000);
+
+  if (!batteryUi.initialized) {
+    batteryUi.initialized = true;
+    batteryUi.filteredBatMv = rawBatMv;
+    batteryUi.filteredCurrentMa = rawCurrentMa;
+    batteryUi.filteredVbusMv = rawVbusMv;
+    batteryUi.lastSampleMs = now;
+    return;
+  }
+
+  if ((now - batteryUi.lastSampleMs) < 1500) return;
+  batteryUi.lastSampleMs = now;
+
+  // Battery voltage jitters noticeably on the PMIC ADC; smooth it before
+  // mapping to a percentage so the UI does not bounce every frame.
+  batteryUi.filteredBatMv = (batteryUi.filteredBatMv * 7 + rawBatMv) / 8;
+  batteryUi.filteredCurrentMa = (batteryUi.filteredCurrentMa * 3 + rawCurrentMa) / 4;
+  batteryUi.filteredVbusMv = (batteryUi.filteredVbusMv * 3 + rawVbusMv) / 4;
+}
+
 static void beep(uint16_t freq, uint16_t dur) {
-  if (settings().sound) compat::beep(freq, dur);
+  if (!settings().sound) return;
+  compat::beep(freq, dur);
 }
 
 static void sendCmd(const char* json) {
@@ -121,7 +172,7 @@ static void sendCmd(const char* json) {
   bleWrite((const uint8_t*)"\n", 1);
 }
 const uint8_t INFO_PAGES = 6;
-const uint8_t INFO_PG_BUTTONS = 1;
+const uint8_t INFO_PG_BUTTONS = 2;
 const uint8_t INFO_PG_CREDITS = 5;
 
 void applyDisplayMode() {
@@ -379,49 +430,14 @@ static void clockRefreshRtc() {
   }
 }
 
-// Hardware mounting makes +ax correspond to the opposite landscape
-// rotation from what users expect while holding the stick.
 static uint8_t _orientFromAx(float ax) {
   return (ax >= 0) ? 3 : 1;
 }
 
 static void clockUpdateOrient() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  uint8_t lock = settings().clockRot;
-  if (lock == 1) { clockOrient = 0; return; }
-  if (lock == 2) {
-    // Locked landscape: never drop to 0, but still pick 1 vs 3 from
-    // gravity so the cradle works either way up. Need a strong tilt
-    // for the 1↔3 swap so handling jitter doesn't flip it; otherwise
-    // hold whatever we last had (or 1 from boot).
-    if (clockOrient == 0) clockOrient = _orientFromAx(ax);
-    if      (ax >  0.5f && clockOrient != 3) clockOrient = 3;
-    else if (ax < -0.5f && clockOrient != 1) clockOrient = 1;
-    return;
-  }
-  // Dual threshold: strict to enter (must be clearly sideways), loose to
-  // stay (tolerate ~65° of tilt). With one shared threshold a slight lean
-  // while sitting on the long edge puts ax right at the boundary and the
-  // counter ratchets down in ~half a second.
-  bool side = (clockOrient == 0)
-    ? fabsf(ax) > 0.7f && fabsf(ay) < 0.5f && fabsf(az) < 0.5f
-    : fabsf(ax) > 0.4f;
-  if (side) { if (orientFrames < 20) orientFrames++; }
-  else      { if (orientFrames > -10) orientFrames--; }
-  if (clockOrient == 0 && orientFrames >= 15) {
-    clockOrient = _orientFromAx(ax);
-  } else if (clockOrient != 0 && orientFrames <= -8) {
-    clockOrient = 0;
-  } else if (clockOrient != 0 && side) {
-    // Direct 1↔3: a fast flip keeps |ax|>0.7 (just changes sign), so
-    // `side` never drops and the exit-via-0 path can't fire. Watch for
-    // ax sign disagreeing with the stored orientation.
-    static int8_t swapFrames = 0;
-    uint8_t want = _orientFromAx(ax);
-    if (want != clockOrient) { if (++swapFrames >= 8) { clockOrient = want; swapFrames = 0; } }
-    else swapFrames = 0;
-  }
+  // IMU-backed clock auto-rotation is disabled. Keep the clock in portrait.
+  clockOrient = 0;
+  orientFrames = 0;
 }
 
 // Clock face: shown when charging on USB with nothing else going on.
@@ -470,13 +486,14 @@ static void drawClock() {
 
   if (clockOrient == 0) {
     paintedOrient = 0;
-    // Bottom half — buddy naturally lives at y=0..82, GIF peeks at top
-    // via peek mode. Clearing from 90 leaves both untouched.
-    spr.fillRect(0, 90, W, H - 90, p.bg);
+    // Portrait clock keeps the GIF at the same full-size home scale, so
+    // reserve the lower 100px for the clock face and leave the upper area
+    // untouched for the character.
+    spr.fillRect(0, 140, W, H - 140, p.bg);
     spr.setTextDatum(MC_DATUM);
-    spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 140);
-    spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 175);
-    spr.setTextSize(1);                                     spr.drawString(dl, CX, 200);
+    spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 168);
+    spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 198);
+    spr.setTextSize(1);                                     spr.drawString(dl, CX, 220);
     spr.setTextDatum(TL_DATUM);
     return;
   }
@@ -530,10 +547,10 @@ static void drawClock() {
 }
 
 PersonaState derive(const TamaState& s) {
-  if (!s.connected)            return P_IDLE;
+  if (!s.connected)            return P_SLEEP;
   if (s.sessionsWaiting > 0)   return P_ATTENTION;
   if (s.recentlyCompleted)     return P_CELEBRATE;
-  if (s.sessionsRunning >= 3)  return P_BUSY;
+  if (s.sessionsRunning >= 1)  return P_BUSY;
   return P_IDLE;   // connected, 0+ sessions, nothing urgent — hang out
 }
 
@@ -543,12 +560,7 @@ void triggerOneShot(PersonaState s, uint32_t durMs) {
 }
 
 bool checkShake() {
-  float ax, ay, az;
-  compat::getAccel(&ax, &ay, &az);
-  float mag = sqrtf(ax*ax + ay*ay + az*az);
-  float delta = fabsf(mag - accelBaseline);
-  accelBaseline = accelBaseline * 0.95f + mag * 0.05f;
-  return delta > 0.8f;
+  return false;
 }
 
 
@@ -594,9 +606,77 @@ void drawInfo() {
   };
 
   if (infoPage == 0) {
+    _infoHeader(p, y, "CODEX", infoPage);
+    uint32_t age = (millis() - tama.lastUpdated) / 1000;
+    const int LEFT_X = 17;
+    const int RUN_CENTER_X = 38;
+    const int WAIT_CENTER_X = 96;
+    const int WAIT_LABEL_X = WAIT_CENTER_X - 21;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("RUNNING");
+    spr.setCursor(WAIT_LABEL_X, y);
+    spr.print("WAITING");
+    y += 10;
+
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextSize(3);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String(tama.sessionsRunning), RUN_CENTER_X, y);
+    spr.drawString(String(tama.sessionsWaiting), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextSize(1);
+    y += 30;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("SESSIONS");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String(tama.sessionsTotal), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 16;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("LINK");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(dataScenarioName(), WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("BLE");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(!bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN", WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("LAST MSG");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(String((unsigned long)age) + "s", WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+    y += 14;
+
+    spr.setTextColor(p.textDim, p.bg);
+    spr.setCursor(LEFT_X, y);
+    spr.print("STATE");
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TC_DATUM);
+    spr.drawString(stateNames[activeState], WAIT_CENTER_X, y);
+    spr.setTextDatum(TL_DATUM);
+
+  } else if (infoPage == 1) {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
-    ln("I watch your Claude");
+    ln("I watch your Codex");
     ln("desktop sessions.");
     y += 6;
     ln("I sleep when nothing's");
@@ -613,7 +693,7 @@ void drawInfo() {
     ln("18 species. Settings");
     ln("> ascii pet to cycle.");
 
-  } else if (infoPage == 1) {
+  } else if (infoPage == 2) {
     _infoHeader(p, y, "BUTTONS", infoPage);
     spr.setTextColor(p.text, p.bg);    ln("A   front");
     spr.setTextColor(p.textDim, p.bg); ln("    next screen");
@@ -627,28 +707,12 @@ void drawInfo() {
     spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
     ln("    hold 6s = off");
 
-  } else if (infoPage == 2) {
-    _infoHeader(p, y, "CLAUDE", infoPage);
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  sessions  %u", tama.sessionsTotal);
-    ln("  running   %u", tama.sessionsRunning);
-    ln("  waiting   %u", tama.sessionsWaiting);
-    y += 8;
-    spr.setTextColor(p.text, p.bg);
-    ln("LINK");
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  via       %s", dataScenarioName());
-    ln("  ble       %s", !bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN");
-    uint32_t age = (millis() - tama.lastUpdated) / 1000;
-    ln("  last msg  %lus", (unsigned long)age);
-    ln("  state     %s", stateNames[activeState]);
-
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
-    int vBat_mV = (int)(compat::batVoltageV() * 1000);
-    int iBat_mA = (int)compat::batCurrentMA();
-    int vBus_mV = (int)(compat::vbusVoltageV() * 1000);
+    int vBat_mV = batteryUi.filteredBatMv;
+    int iBat_mA = batteryUi.filteredCurrentMa;
+    int vBus_mV = batteryUi.filteredVbusMv;
     int pct = (vBat_mV - 3200) / 10;   // (v-3.2)/(4.2-3.2)*100 = (v-3.2)*100 = (mv-3200)/10
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     bool usb = vBus_mV > 4000;
@@ -710,7 +774,7 @@ void drawInfo() {
       spr.setTextColor(p.text, p.bg);
       ln("TO PAIR");
       spr.setTextColor(p.textDim, p.bg);
-      ln(" Open Claude desktop");
+      ln(" Open Codex desktop");
       ln(" > Developer");
       ln(" > Hardware Buddy");
       y += 4;
@@ -724,13 +788,23 @@ void drawInfo() {
     y += 4;
     spr.setTextColor(p.text, p.bg);
     ln("Felix Rieseberg");
+    y += 8;
+    spr.setTextColor(p.textDim, p.bg);
+    ln("mod by");
+    y += 4;
+    spr.setTextColor(p.text, p.bg);
+    ln("arnoldn");
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("source");
     y += 4;
     spr.setTextColor(p.text, p.bg);
-    ln("github.com/anthropics");
-    ln("/claude-desktop-buddy");
+    ln("cd /home/arnold/Projects");
+    ln("/codex-buddy/claude-des");
+    ln("ktop-buddy-s3");
+    ln("./.venv/bin/python3 -m");
+    ln(" platformio run -t");
+    ln(" upload");
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
@@ -773,6 +847,51 @@ static uint8_t wrapInto(const char* in, char out[][24], uint8_t maxRows, uint8_t
   }
   if (col > 0 && row < maxRows) { out[row][col] = 0; row++; }
   return row;
+}
+
+static uint8_t wrapIntoCenteredWords(const char* in, char out[][24], uint8_t maxRows, int maxPx) {
+  if (!in || !*in || maxRows == 0) return 0;
+
+  uint8_t row = 0;
+  out[row][0] = 0;
+  const char* p = in;
+
+  while (*p && row < maxRows) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+
+    const char* w = p;
+    while (*p && *p != ' ') p++;
+    size_t wlen = (size_t)(p - w);
+    if (wlen == 0) break;
+    if (wlen > 23) wlen = 23;
+
+    char word[24];
+    memcpy(word, w, wlen);
+    word[wlen] = 0;
+
+    char candidate[24];
+    if (out[row][0]) snprintf(candidate, sizeof(candidate), "%s %s", out[row], word);
+    else snprintf(candidate, sizeof(candidate), "%s", word);
+
+    if (spr.textWidth(candidate) <= maxPx) {
+      snprintf(out[row], 24, "%s", candidate);
+      continue;
+    }
+
+    if (out[row][0] == 0) {
+      // A single overlong token cannot be wrapped without splitting.
+      // Leave it intact on its own line and let the caller decide whether
+      // to shorten upstream content.
+      snprintf(out[row], 24, "%s", word);
+    }
+
+    if (++row >= maxRows) return row;
+    out[row][0] = 0;
+    snprintf(out[row], 24, "%s", word);
+  }
+
+  return out[row][0] ? row + 1 : row;
 }
 
 static void drawApproval() {
@@ -947,17 +1066,29 @@ static bool promptActive() {
 void drawHUD() {
   if (promptActive()) { drawApproval(); return; }
   const Palette& p = characterPalette();
-  const int SHOW = 3, LH = 8, WIDTH = 21;
-  const int AREA = SHOW * LH + 4;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.setTextSize(1);
+  const int SHOW = 2, LH = 16, MAX_PX = 118;
+  const int AREA = SHOW * LH + 10;
+  const int TOP = 170;
+  spr.fillRect(0, TOP, W, AREA, p.bg);
+  spr.setTextSize(2);
+  spr.setTextDatum(MC_DATUM);
 
   if (tama.lineGen != lastLineGen) { msgScroll = 0; lastLineGen = tama.lineGen; wake(); }
 
   if (tama.nLines == 0) {
+    static char msgDisp[8][24];
+    uint8_t nMsg = wrapIntoCenteredWords(tama.msg, msgDisp, 8, MAX_PX);
+    if (nMsg == 0) {
+      spr.setTextDatum(TL_DATUM);
+      return;
+    }
     spr.setTextColor(p.text, p.bg);
-    spr.setCursor(4, H - LH - 2);
-    spr.print(tama.msg);
+    uint8_t shown = nMsg > SHOW ? SHOW : nMsg;
+    int start = nMsg - shown;
+    for (uint8_t i = 0; i < shown; i++) {
+      spr.drawString(msgDisp[start + i], W / 2, TOP + 8 + i * LH);
+    }
+    spr.setTextDatum(TL_DATUM);
     return;
   }
 
@@ -967,7 +1098,7 @@ void drawHUD() {
   static uint8_t srcOf[32];
   uint8_t nDisp = 0;
   for (uint8_t i = 0; i < tama.nLines && nDisp < 32; i++) {
-    uint8_t got = wrapInto(tama.lines[i], &disp[nDisp], 32 - nDisp, WIDTH);
+    uint8_t got = wrapIntoCenteredWords(tama.lines[i], &disp[nDisp], 32 - nDisp, MAX_PX);
     for (uint8_t j = 0; j < got; j++) srcOf[nDisp + j] = i;
     nDisp += got;
   }
@@ -982,18 +1113,22 @@ void drawHUD() {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.setCursor(4, H - AREA + 2 + i * LH);
-    spr.print(disp[row]);
+    spr.drawString(disp[row], W / 2, TOP + 8 + i * LH);
   }
+  spr.setTextDatum(TL_DATUM);
   if (msgScroll > 0) {
+    spr.setTextSize(1);
     spr.setTextColor(p.body, p.bg);
-    spr.setCursor(W - 18, H - LH - 2);
+    spr.setCursor(W - 22, TOP + AREA - 10);
     spr.printf("-%u", msgScroll);
   }
 }
 
 void setup() {
   auto cfg = M5.config();
+  cfg.output_power = false;   // No external 5V accessories in this project.
+  cfg.internal_imu = false;   // IMU-driven shake/flip/rotation logic is disabled.
+  cfg.internal_mic = false;   // Mic is unused; skip its I2S init and bias power.
   M5.begin(cfg);
   M5.Display.setRotation(0);
   M5.Speaker.begin();
@@ -1006,17 +1141,20 @@ void setup() {
   statsLoad();
   settingsLoad();
   petNameLoad();
-  buddyInit();
 
   // BLE stays always-on; s.bt is stored as a preference only.
   spr.setColorDepth(16);
   spr.createSprite(W, H);
+  // Load GIF character first (if any), so buddyInit() skips ASCII rendering
+  // when GIF mode is active. Fixes the "buddy appears as ASCII then suddenly
+  // changes to GIF" on boot after a character transfer.
   characterInit(nullptr);
   gifAvailable = characterLoaded();
   // species NVS: 0..N-1 = ASCII species, 0xFF = use GIF (also the default,
   // so a fresh install lands on the GIF). With no GIF installed, 0xFF falls
   // through to buddyInit()'s clamped default.
   buddyMode = !(gifAvailable && speciesIdxLoad() == SPECIES_GIF);
+  buddyInit();
   applyDisplayMode();
 
   {
@@ -1048,10 +1186,17 @@ void loop() {
   M5.update();
   t++;
   uint32_t now = millis();
+  sampleBatteryUi(now);
 
   dataPoll(&tama);
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
+  if (baseState == P_BUSY && lastBaseState != P_BUSY) wake();
+  if (baseState == P_IDLE) {
+    if (idleStartedMs == 0) idleStartedMs = now;
+  } else {
+    idleStartedMs = 0;
+  }
 
   // After waking the screen, hold sleep for 12s so users see the wake-up
   // animation. Urgent states (attention, celebrate, busy) override this.
@@ -1059,8 +1204,10 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
-  // LED: pulse on attention, otherwise off
-  if (activeState == P_ATTENTION && settings().led) {
+  // Red status LED is only useful while the screen is visible. Turn it off
+  // during screen-off and face-down nap so it does not waste power in
+  // "sleeping" states.
+  if (!screenOff && !napping && activeState == P_ATTENTION && settings().led) {
     digitalWrite(LED_PIN, (now / 400) % 2 ? LOW : HIGH);
   } else {
     digitalWrite(LED_PIN, HIGH);
@@ -1084,13 +1231,8 @@ void loop() {
     if (tama.promptId[0] == 0) {
       // Bridge clear snapshot arrived — allow future prompts normally.
       responseSent = false;
-      lastHandledPromptId[0] = 0;
-    } else if (strcmp(tama.promptId, lastHandledPromptId) == 0) {
-      // Ignore stale replay of a prompt we've already answered.
-      responseSent = true;
-      tama.promptId[0] = 0;
-      tama.promptTool[0] = 0;
-      tama.promptHint[0] = 0;
+      applyDisplayMode();               // 彻底擦除屏幕上的弹窗残影
+      if (buddyMode) buddyInvalidate(); // 强制下一次循环重绘宠物
     } else {
       responseSent = false;
       promptArrivedMs = millis();
@@ -1119,18 +1261,24 @@ void loop() {
     wake();
   }
 
-  // Power button (left side): short-press toggles screen off.
-  // Long-press (6s) still powers off via hardware on supported boards.
-  if (M5.BtnPWR.wasClicked()) {
-    if (screenOff) {
-      wake();
-    } else {
+  // StickS3's side button is a PMIC power/reset key in hardware, not a safe
+  // general-purpose UI key. Use an A+B chord for manual screen-off instead.
+  if (M5.BtnA.isPressed() && M5.BtnB.isPressed()) {
+    if (comboPressStartMs == 0) comboPressStartMs = now;
+    if (!screenOff && !comboScreenHandled && (now - comboPressStartMs) >= 350) {
       compat::screenPower(false);
       screenOff = true;
+      if (dimmed) dimmed = false;
+      swallowBtnA = true;
+      swallowBtnB = true;
+      comboScreenHandled = true;
     }
+  } else {
+    comboPressStartMs = 0;
+    comboScreenHandled = false;
   }
 
-  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA) {
+  if (M5.BtnA.pressedFor(600) && !btnALong && !swallowBtnA && !M5.BtnB.isPressed()) {
     btnALong = true;
     beep(800, 60);
     if (resetOpen) { resetOpen = false; }
@@ -1154,6 +1302,7 @@ void loop() {
         tama.promptId[0] = 0;
         tama.promptTool[0] = 0;
         tama.promptHint[0] = 0;
+        tama.sessionsWaiting = 0;  // sync with UI so derive() stops showing attention
         uint32_t tookS = (millis() - promptArrivedMs) / 1000;
         statsOnApproval(tookS);
         beep(2400, 60);
@@ -1178,9 +1327,13 @@ void loop() {
     swallowBtnA = false;
   }
 
-  // BtnB: pet → heart
+  // BtnB: prompt/settings/info/pet keep their existing actions.
+  // On the normal page, B is reserved for manual screen-off.
   if (M5.BtnB.wasPressed()) {
     if (swallowBtnB) { swallowBtnB = false; }
+    else if (M5.BtnA.isPressed()) {
+      // A+B is reserved for manual screen-off.
+    }
     else
     if (inPrompt) {
       char cmd[96];
@@ -1190,9 +1343,10 @@ void loop() {
       lastHandledPromptId[sizeof(lastHandledPromptId)-1] = 0;
       responseSent = true;
       tama.promptId[0] = 0;
-      tama.promptTool[0] = 0;
-      tama.promptHint[0] = 0;
-      statsOnDenial();
+       tama.promptTool[0] = 0;
+       tama.promptHint[0] = 0;
+       tama.sessionsWaiting = 0;  // sync with UI so derive() stops showing attention
+       statsOnDenial();
       beep(600, 60);
     } else if (resetOpen) {
       beep(2400, 30);
@@ -1210,9 +1364,13 @@ void loop() {
       beep(2400, 30);
       petPage = (petPage + 1) % PET_PAGES;
       applyDisplayMode();
+    } else if (displayMode == DISP_NORMAL) {
+      compat::screenPower(false);
+      screenOff = true;
+      if (dimmed) dimmed = false;
+      swallowBtnB = true;
     } else {
       beep(2400, 30);
-      msgScroll = (msgScroll >= 30) ? 0 : msgScroll + 1;
     }
   }
 
@@ -1223,6 +1381,10 @@ void loop() {
   // by the bridge. Pet sleeps underneath. Exit restores Y via
   // applyDisplayMode() so the next mode-switch isn't visually offset.
   clockRefreshRtc();   // 1Hz internal throttle; also caches _onUsb
+  bool usbIdleSleep = _onUsb && idleStartedMs != 0 && (now - idleStartedMs) >= USB_IDLE_SLEEP_MS;
+  bool usbIdleRecover = _onUsb && baseState == P_IDLE && idleStartedMs != 0 && !inPrompt;
+  statsPollUsbIdleRecovery(usbIdleRecover);
+  if (baseState == P_IDLE && usbIdleSleep) baseState = P_SLEEP;
   // Show the clock when nothing is happening — bridge heartbeat alone
   // doesn't count as activity (it's the only way to get the RTC synced).
   bool clocking = displayMode == DISP_NORMAL
@@ -1236,7 +1398,7 @@ void loop() {
   static bool wasClocking = false;
   static bool wasLandscape = false;
   if (clocking != wasClocking || landscapeClock != wasLandscape) {
-    if (clocking && !landscapeClock) characterSetPeek(true);
+    if (clocking && !landscapeClock) characterSetPeek(false);
     else applyDisplayMode();
     characterInvalidate();
     if (buddyMode) buddyInvalidate();
@@ -1244,18 +1406,18 @@ void loop() {
     wasLandscape = landscapeClock;
   }
   if (clocking) {
-    uint8_t dow = clockDow();
-    bool weekend = (dow == 0 || dow == 6);
-    bool friday  = (dow == 5);
-
     uint8_t h = _clkTm.hours;
-    if (h >= 1 && h < 7)             activeState = P_SLEEP;
-    else if (weekend)                activeState = (now/8000 % 6 == 0) ? P_HEART : P_SLEEP;
-    else if (h < 9)                  activeState = (now/6000 % 4 == 0) ? P_IDLE  : P_SLEEP;
-    else if (h == 12)                activeState = (now/5000 % 3 == 0) ? P_HEART : P_IDLE;
-    else if (friday && h >= 15)      activeState = (now/4000 % 3 == 0) ? P_CELEBRATE : P_IDLE;
-    else if (h >= 22 || h == 0)      activeState = (now/7000 % 3 == 0) ? P_DIZZY : P_SLEEP;
-    else                             activeState = (now/10000 % 5 == 0) ? P_SLEEP : P_IDLE;
+    activeState = (h < 8 || usbIdleSleep) ? P_SLEEP : P_IDLE;
+  }
+
+  bool sleepingNow = activeState == P_SLEEP;
+  if (sleepingNow && !sleepStateActive) {
+    sleepStateActive = true;
+    sleepStateStartedMs = now;
+  } else if (!sleepingNow && sleepStateActive) {
+    uint32_t sleptMs = now - sleepStateStartedMs;
+    sleepStateActive = false;
+    if (sleptMs >= ENERGY_RESTORE_SLEEP_MS) statsOnWake();
   }
 
   static uint32_t lastPasskey = 0;
@@ -1326,18 +1488,59 @@ void loop() {
   } else if (napping && faceDownFrames <= -8) {
     napping = false;
     statsOnNapEnd((now - napStartMs) / 1000);
-    statsOnWake();
     wake();
   }
 
-  // millis() not the cached `now`: wake() runs after `now` is captured,
-  // so now - lastInteractMs underflows when a button is held → flicker.
-  // No auto-off on USB power — clock face wants to stay visible while charging.
-  if (!screenOff && !inPrompt && !_onUsb
-      && millis() - lastInteractMs > SCREEN_OFF_MS) {
-    compat::screenPower(false);
-    screenOff = true;
+  // Battery-only display power policy:
+  // - idle: 30s inactivity -> screen off
+  // - busy / approval: 30s inactivity -> minimum visible brightness
+  // - sleep: 10s inactivity -> screen off
+  // USB power disables all automatic dim/off behavior.
+  if (!_onUsb) {
+    uint32_t inactiveMs = millis() - lastInteractMs;
+    bool wantsDim = false;
+    bool wantsOff = false;
+
+    if (inPrompt || activeState == P_BUSY || activeState == P_ATTENTION) {
+      wantsDim = inactiveMs >= BUSY_DIM_MS;
+    } else if (baseState == P_IDLE) {
+      wantsOff = inactiveMs >= IDLE_SCREEN_OFF_MS;
+    } else if (baseState == P_SLEEP) {
+      wantsOff = inactiveMs >= SLEEP_SCREEN_OFF_MS;
+    }
+
+    if (!screenOff && wantsOff) {
+      compat::screenPower(false);
+      screenOff = true;
+      if (dimmed) dimmed = false;
+    } else if (!screenOff && wantsDim) {
+      if (!dimmed) {
+        compat::setScreenBrightness0_100(MIN_VISIBLE_BRIGHTNESS);
+        dimmed = true;
+      }
+    } else if (!screenOff && dimmed) {
+      applyBrightness();
+      dimmed = false;
+    }
+  } else if (!screenOff && dimmed) {
+    applyBrightness();
+    dimmed = false;
   }
 
-  delay(screenOff ? 100 : 16);
+  bool wantsAdvertising = true;
+  if (!_onUsb && screenOff && !bleConnected()) {
+    uint32_t inactiveMs = millis() - lastInteractMs;
+    uint32_t periodMs = SHORT_ADV_PERIOD_MS;
+    uint32_t onMs = SHORT_ADV_ON_MS;
+    if (inactiveMs >= SHORT_DUTY_WINDOW_MS) {
+      periodMs = LONG_ADV_PERIOD_MS;
+      onMs = LONG_ADV_ON_MS;
+    }
+    wantsAdvertising = (inactiveMs % periodMs) < onMs;
+  }
+  bleSetAdvertising(wantsAdvertising);
+
+  lastBaseState = baseState;
+
+  delay(screenOff ? 200 : 16);
 }

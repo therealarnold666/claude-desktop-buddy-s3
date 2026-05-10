@@ -10,6 +10,7 @@ static const char* STATE_NAMES[] = {
   "sleep", "idle", "busy", "attention", "celebrate", "dizzy", "heart"
 };
 static const uint8_t N_STATES = 7;
+static const uint8_t STATE_SLEEP = 0;
 
 // Text mode: manifest has "mode":"text", states contain {frames:[...],delay:N}.
 // Frames are short strings rendered at text size 2, centered. No GIF pipeline.
@@ -373,15 +374,17 @@ void characterTick() {
 
   int delayMs = 0;
   if (!gif.playFrame(false, &delayMs)) {
-    // End of animation. Single-gif states freeze on the last frame instead
-    // of reopening — the LittleFS open + GIF header decode is a multi-ms
-    // blocking burst, and during sleep state it was looping every ~4s,
-    // possibly starving the BT controller. The sprite already holds the
-    // last frame; just stop ticking. Multi-gif states (idle rotation)
-    // still advance after a brief pause.
+    // End of animation. Keep sleep frozen on its final frame so the device
+    // can look truly dormant, but loop other single-GIF states in place so
+    // busy/attention/heart don't look like they lock up after one flash.
     if (stateCount[curState] == 1) {
-      gif.close();
-      gifOpen = false;
+      if (curState == STATE_SLEEP) {
+        gif.close();
+        gifOpen = false;
+        return;
+      }
+      gif.reset();
+      nextFrameAt = now;
       return;
     }
     // Multi-variant: loop the same GIF until the dwell window elapses, then
