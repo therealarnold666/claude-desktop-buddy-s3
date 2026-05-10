@@ -149,7 +149,7 @@ static bool interactiveUiEnabled() {
 }
 
 static bool interactiveActive() {
-  return interactiveUiEnabled() && isInteractiveWaiting(tama) && tama.interactiveId[0] != 0 && tama.interactiveQuestionCount > 0;
+  return interactiveUiEnabled() && isInteractiveWaiting(tama);
 }
 
 static bool interactiveHostSubmitting() {
@@ -161,8 +161,7 @@ static bool interactiveSubmissionPending() {
 }
 
 static uint8_t interactivePageCount() {
-  if (tama.interactiveQuestionCount == 0) return 1;
-  return 2 + tama.interactiveOptionCounts[0];
+  return 1;
 }
 
 static int interactivePageForQuestion(uint8_t page, uint8_t* questionIndex, int8_t* optionIndex) {
@@ -1119,74 +1118,26 @@ static void drawInteractive() {
   uint8_t totalPages = interactivePageCount();
   if (interactivePage >= totalPages) interactivePage = 0;
 
-  if (interactivePage == 0) {
-    const int AREA = 94;
-    uint8_t questionCount = tama.interactiveQuestionTotal ? tama.interactiveQuestionTotal : tama.interactiveQuestionCount;
-    spr.fillRect(0, H - AREA, W, AREA, p.bg);
-    spr.drawFastHLine(0, H - AREA, W, p.textDim);
+  const int AREA = 94;
+  spr.fillRect(0, H - AREA, W, AREA, p.bg);
+  spr.drawFastHLine(0, H - AREA, W, p.textDim);
 
-    spr.setTextDatum(TL_DATUM);
-    spr.setTextSize(1);
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(4, H - AREA + 4);
-    spr.print("input needed");
-    spr.setCursor(W - 30, H - AREA + 4);
-    spr.printf("%u/%u", interactivePage + 1, totalPages);
-
-    spr.setTextDatum(MC_DATUM);
-    spr.setTextSize(2);
-    spr.setTextColor(p.text, p.bg);
-    spr.drawString("extra input", W / 2, H - AREA + 24);
-
-    spr.setTextSize(1);
-    char detail[48];
-    snprintf(detail, sizeof(detail), "%u question%s from Codex", questionCount, questionCount == 1 ? "" : "s");
-    spr.setTextColor(p.body, p.bg);
-    spr.drawString(detail, W / 2, H - AREA + 46);
-    spr.setTextColor(p.textDim, p.bg);
-    spr.drawString("B: next page", W / 2, H - 20);
-    spr.drawString("A: continue", W / 2, H - 8);
-    spr.setTextDatum(TL_DATUM);
-    return;
-  }
-
-  spr.fillRect(0, 0, W, H, p.bg);
-  spr.setTextDatum(MC_DATUM);
+  spr.setTextDatum(TL_DATUM);
   spr.setTextSize(1);
   spr.setTextColor(p.textDim, p.bg);
-  spr.drawString(String(interactivePage + 1) + "/" + String(totalPages), W / 2, 8);
-  spr.drawFastHLine(0, 20, W, p.textDim);
+  spr.setCursor(4, H - AREA + 4);
+  spr.print("input needed");
 
-  uint8_t questionIndex = 0;
-  int8_t optionIndex = -1;
-  int pageType = interactivePageForQuestion(interactivePage, &questionIndex, &optionIndex);
-  if (pageType == 1) {
-    char qLabel[24];
-    snprintf(qLabel, sizeof(qLabel), "Q%u", tama.interactiveQuestionIndex + 1);
-    drawCenteredWrappedBlock(qLabel, 30, 1, p.body, 60, 14);
-    drawCenteredWrappedBlock(tama.interactiveHeaders[questionIndex], 48, 2, p.body, 124, 14);
-    drawCenteredWrappedBlock(tama.interactiveQuestions[questionIndex], 84, 9, p.text, 126, 15);
-    spr.setTextColor(p.textDim, p.bg);
-    spr.drawString("A/B: next", W / 2, 228);
-    spr.setTextDatum(TL_DATUM);
-    return;
-  }
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextSize(2);
+  spr.setTextColor(p.text, p.bg);
+  spr.drawString("extra input", W / 2, H - AREA + 24);
 
-  if (pageType == 2) {
-    char head[64];
-    char optionLetter = (char)('A' + optionIndex);
-    bool pending = interactiveSubmissionPending();
-    snprintf(head, sizeof(head), "%c of Q%u", optionLetter, tama.interactiveQuestionIndex + 1);
-    drawCenteredWrappedBlock(head, 30, 1, p.body, 110, 14);
-    drawCenteredWrappedBlock(tama.interactiveOptions[questionIndex][optionIndex], 72, 8, p.text, 124, 16);
-    spr.setTextColor(p.textDim, p.bg);
-    if (pending) spr.drawString("sending...", W / 2, 210);
-    else if (interactiveAnswers[questionIndex] == optionIndex) spr.drawString("selected", W / 2, 210);
-    spr.drawString(pending ? "waiting for host" : "B: next  A: choose", W / 2, 228);
-    spr.setTextDatum(TL_DATUM);
-    return;
-  }
-
+  spr.setTextSize(1);
+  spr.setTextColor(p.body, p.bg);
+  spr.drawString("Continue on desktop", W / 2, H - AREA + 46);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString("codex is waiting for you", W / 2, H - 20);
   spr.setTextDatum(TL_DATUM);
 }
 
@@ -1509,12 +1460,12 @@ void loop() {
     interactiveAlertLatched = false;
   }
 
-  if (strcmp(tama.interactiveId, lastInteractiveId) != 0) {
-    strncpy(lastInteractiveId, tama.interactiveId, sizeof(lastInteractiveId)-1);
+  if (interactiveWaitingNow && lastInteractiveId[0] == 0) {
+    strncpy(lastInteractiveId, "active", sizeof(lastInteractiveId)-1);
     lastInteractiveId[sizeof(lastInteractiveId)-1] = 0;
-    lastInteractiveQuestionIndex = tama.interactiveQuestionIndex;
+    lastInteractiveQuestionIndex = 0;
     resetInteractiveAnswers();
-    if (tama.interactiveId[0] != 0 && interactiveUiEnabled()) {
+    if (interactiveUiEnabled()) {
       wake();
       displayMode = DISP_NORMAL;
       menuOpen = settingsOpen = resetOpen = false;
@@ -1522,15 +1473,8 @@ void loop() {
       characterInvalidate();
       if (buddyMode) buddyInvalidate();
     }
-  } else if (tama.interactiveId[0] != 0 && tama.interactiveQuestionIndex != lastInteractiveQuestionIndex) {
-    lastInteractiveQuestionIndex = tama.interactiveQuestionIndex;
-    interactivePage = 1;
-    interactiveSubmitting = false;
-    interactiveAnswers[0] = -1;
-    wake();
-  } else if (tama.interactiveId[0] != 0 && interactiveSubmitting && !interactiveHostSubmitting()) {
-    interactiveSubmitting = false;
-  } else if (tama.interactiveId[0] == 0) {
+  } else if (!interactiveWaitingNow && lastInteractiveId[0] != 0) {
+    lastInteractiveId[0] = 0;
     interactiveSubmitting = false;
   }
 
@@ -1595,22 +1539,7 @@ void loop() {
         beep(2400, 60);
         if (tookS < 5) triggerOneShot(P_HEART, 2000);
       } else if (inInteractive) {
-        if (interactiveSubmissionPending()) {
-          beep(1200, 20);
-        } else {
-        uint8_t qIndex = 0;
-        int8_t oIndex = -1;
-        int pageType = interactivePageForQuestion(interactivePage, &qIndex, &oIndex);
-        if (interactivePage == 0 || pageType == 1) {
-          beep(1800, 30);
-          interactivePage = (interactivePage + 1) % interactivePageCount();
-        } else if (pageType == 2 && oIndex >= 0) {
-          beep(2400, 40);
-          interactiveAnswers[qIndex] = oIndex;
-          interactiveSubmitting = true;
-          sendInteractiveSelection(tama.interactiveQuestionIndex, (uint8_t)oIndex);
-        }
-        }
+        beep(1200, 20);
       } else if (resetOpen) {
         beep(1800, 30);
         resetSel = (resetSel + 1) % RESET_N;
@@ -1653,10 +1582,7 @@ void loop() {
        statsOnDenial();
       beep(600, 60);
     } else if (inInteractive) {
-      if (!interactiveSubmissionPending()) {
-        beep(2400, 30);
-        interactivePage = (interactivePage + 1) % interactivePageCount();
-      }
+      beep(1200, 20);
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
