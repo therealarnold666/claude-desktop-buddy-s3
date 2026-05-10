@@ -7,6 +7,9 @@
 struct TamaState {
   static constexpr uint8_t INTERACTIVE_Q_MAX = 4;
   static constexpr uint8_t INTERACTIVE_OPT_MAX = 4;
+  static constexpr uint8_t INTERACTIVE_HEADER_BYTES = 48;
+  static constexpr uint16_t INTERACTIVE_QUESTION_BYTES = 256;
+  static constexpr uint16_t INTERACTIVE_OPTION_BYTES = 160;
   uint8_t  sessionsTotal;
   uint8_t  sessionsRunning;
   uint8_t  sessionsWaiting;
@@ -24,12 +27,15 @@ struct TamaState {
   char     interactiveId[32];
   char     interactiveCallId[32];
   char     interactiveTurnId[40];
+  char     interactiveStatus[16];
+  uint8_t  interactiveQuestionIndex;
+  uint8_t  interactiveQuestionTotal;
   uint8_t  interactiveQuestionCount;
   char     interactiveQuestionIds[INTERACTIVE_Q_MAX][32];
-  char     interactiveHeaders[INTERACTIVE_Q_MAX][20];
-  char     interactiveQuestions[INTERACTIVE_Q_MAX][92];
+  char     interactiveHeaders[INTERACTIVE_Q_MAX][INTERACTIVE_HEADER_BYTES];
+  char     interactiveQuestions[INTERACTIVE_Q_MAX][INTERACTIVE_QUESTION_BYTES];
   uint8_t  interactiveOptionCounts[INTERACTIVE_Q_MAX];
-  char     interactiveOptions[INTERACTIVE_Q_MAX][INTERACTIVE_OPT_MAX][64];
+  char     interactiveOptions[INTERACTIVE_Q_MAX][INTERACTIVE_OPT_MAX][INTERACTIVE_OPTION_BYTES];
 };
 
 // ---------------------------------------------------------------------------
@@ -160,9 +166,13 @@ static void _applyJson(const char* line, TamaState* out) {
     const char* iid = ir["id"];
     const char* callId = ir["call_id"];
     const char* turnId = ir["turn_id"];
+    const char* status = ir["status"];
     strncpy(out->interactiveId, iid ? iid : "", sizeof(out->interactiveId)-1); out->interactiveId[sizeof(out->interactiveId)-1]=0;
     strncpy(out->interactiveCallId, callId ? callId : "", sizeof(out->interactiveCallId)-1); out->interactiveCallId[sizeof(out->interactiveCallId)-1]=0;
     strncpy(out->interactiveTurnId, turnId ? turnId : "", sizeof(out->interactiveTurnId)-1); out->interactiveTurnId[sizeof(out->interactiveTurnId)-1]=0;
+    strncpy(out->interactiveStatus, status ? status : "", sizeof(out->interactiveStatus)-1); out->interactiveStatus[sizeof(out->interactiveStatus)-1]=0;
+    out->interactiveQuestionIndex = ir["question_index"] | 0;
+    out->interactiveQuestionTotal = ir["question_count"] | 0;
     out->interactiveQuestionCount = 0;
     JsonArray qs = ir["questions"];
     if (!qs.isNull()) {
@@ -198,6 +208,8 @@ static void _applyJson(const char* line, TamaState* out) {
     }
   } else {
     out->interactiveId[0] = 0; out->interactiveCallId[0] = 0; out->interactiveTurnId[0] = 0;
+    out->interactiveStatus[0] = 0;
+    out->interactiveQuestionIndex = 0; out->interactiveQuestionTotal = 0;
     out->interactiveQuestionCount = 0;
     for (uint8_t qi = 0; qi < TamaState::INTERACTIVE_Q_MAX; qi++) {
       out->interactiveQuestionIds[qi][0] = 0;

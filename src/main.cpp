@@ -66,6 +66,8 @@ bool     gifAvailable = false;
 uint8_t  interactivePage = 0;
 int8_t   interactiveAnswers[TamaState::INTERACTIVE_Q_MAX] = { -1, -1, -1, -1 };
 char     lastInteractiveId[32] = "";
+uint8_t  lastInteractiveQuestionIndex = 0;
+bool     interactiveSubmitting = false;
 const uint8_t SPECIES_GIF = 0xFF;   // species NVS sentinel: use the installed GIF
 
 // Cycle GIF (if installed) → ASCII species 0..N-1 → GIF. Persisted to the
@@ -150,21 +152,28 @@ static bool interactiveActive() {
   return interactiveUiEnabled() && isInteractiveWaiting(tama) && tama.interactiveId[0] != 0 && tama.interactiveQuestionCount > 0;
 }
 
+static bool interactiveHostSubmitting() {
+  return strcmp(tama.interactiveStatus, "submitting") == 0;
+}
+
+static bool interactiveSubmissionPending() {
+  return interactiveSubmitting || interactiveHostSubmitting();
+}
+
 static uint8_t interactivePageCount() {
-  uint8_t total = 2;
-  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) total += 1 + tama.interactiveOptionCounts[qi];
-  return total;
+  if (tama.interactiveQuestionCount == 0) return 1;
+  return 2 + tama.interactiveOptionCounts[0];
 }
 
 static int interactivePageForQuestion(uint8_t page, uint8_t* questionIndex, int8_t* optionIndex) {
   if (page == 0) { *questionIndex = 0; *optionIndex = -1; return 0; }
   if (page == 1) { *questionIndex = 0; *optionIndex = -1; return 1; }
-  uint8_t cursor = 2;
-  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) {
-    if (page == cursor) { *questionIndex = qi; *optionIndex = -1; return 1; }
-    cursor++;
-    for (uint8_t oi = 0; oi < tama.interactiveOptionCounts[qi]; oi++, cursor++) {
-      if (page == cursor) { *questionIndex = qi; *optionIndex = oi; return 2; }
+  if (tama.interactiveQuestionCount > 0) {
+    uint8_t optPage = page - 2;
+    if (optPage < tama.interactiveOptionCounts[0]) {
+      *questionIndex = 0;
+      *optionIndex = (int8_t)optPage;
+      return 2;
     }
   }
   *questionIndex = 0; *optionIndex = -1;
@@ -174,20 +183,7 @@ static int interactivePageForQuestion(uint8_t page, uint8_t* questionIndex, int8
 static void resetInteractiveAnswers() {
   for (uint8_t i = 0; i < TamaState::INTERACTIVE_Q_MAX; i++) interactiveAnswers[i] = -1;
   interactivePage = 0;
-}
-
-static uint8_t interactiveFirstUnansweredQuestion() {
-  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount; qi++) {
-    if (interactiveAnswers[qi] < 0) return qi;
-  }
-  return tama.interactiveQuestionCount;
-}
-
-static void interactiveJumpToQuestion(uint8_t questionIndex) {
-  if (questionIndex >= tama.interactiveQuestionCount) return;
-  uint8_t page = 2;
-  for (uint8_t qi = 0; qi < questionIndex; qi++) page += 1 + tama.interactiveOptionCounts[qi];
-  interactivePage = page;
+  interactiveSubmitting = false;
 }
 
 static void beepInteractiveAlert() {
@@ -242,13 +238,16 @@ static void sendCmd(const char* json) {
   bleWrite((const uint8_t*)"\n", 1);
 }
 
-static void sendInteractiveSelection() {
+static void sendInteractiveSelection(uint8_t questionIndex, uint8_t answerIndex) {
   char cmd[192];
-  int pos = snprintf(cmd, sizeof(cmd), "{\"cmd\":\"interactive_select\",\"id\":\"%s\",\"answers\":[", tama.interactiveId);
-  for (uint8_t qi = 0; qi < tama.interactiveQuestionCount && pos < (int)sizeof(cmd) - 8; qi++) {
-    pos += snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, "%s%d", qi ? "," : "", (int)interactiveAnswers[qi]);
-  }
-  snprintf(cmd + pos, sizeof(cmd) - (size_t)pos, "]}");
+  snprintf(
+    cmd,
+    sizeof(cmd),
+    "{\"cmd\":\"interactive_select\",\"id\":\"%s\",\"question_index\":%u,\"answer\":%u}",
+    tama.interactiveId,
+    questionIndex,
+    answerIndex
+  );
   sendCmd(cmd);
 }
 const uint8_t INFO_PAGES = 6;
@@ -1020,66 +1019,170 @@ static void drawApproval() {
   }
 }
 
-static void drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color) {
-  char lines[8][24];
-  uint8_t rows = wrapIntoCenteredWords(text ? text : "", lines, maxRows, 118);
+static uint8_t utf8CharLen(uint8_t lead) {
+  if ((lead & 0x80) == 0x00) return 1;
+  if ((lead & 0xE0) == 0xC0) return 2;
+  if ((lead & 0xF0) == 0xE0) return 3;
+  if ((lead & 0xF8) == 0xF0) return 4;
+  return 1;
+}
+
+static bool containsNonAscii(const char* text) {
+  if (!text) return false;
+  for (const uint8_t* p = (const uint8_t*)text; *p; ++p) {
+    if (*p & 0x80) return true;
+  }
+  return false;
+}
+
+static const lgfx::IFont* interactiveTextFont(const char* text) {
+  if (containsNonAscii(text)) return &fonts::efontCN_16;
+  return &fonts::Font2;
+}
+
+static void restoreDefaultUiFont() {
+  spr.setFont(&fonts::Font0);
+  spr.setTextSize(1);
+}
+
+static uint8_t wrapIntoCenteredUtf8(const char* in, char out[][96], uint8_t maxRows, int maxPx) {
+  if (!in || !*in || maxRows == 0) return 0;
+
+  uint8_t row = 0;
+  uint8_t colBytes = 0;
+  out[row][0] = 0;
+  const uint8_t* p = (const uint8_t*)in;
+
+  while (*p && row < maxRows) {
+    if (*p == '\n' || *p == '\r') {
+      if (colBytes > 0) {
+        out[row][colBytes] = 0;
+        if (++row >= maxRows) return row;
+        out[row][0] = 0;
+        colBytes = 0;
+      }
+      ++p;
+      continue;
+    }
+
+    if (colBytes == 0) {
+      while (*p == ' ') ++p;
+      if (!*p) break;
+    }
+
+    uint8_t len = utf8CharLen(*p);
+    char glyph[8] = {0};
+    for (uint8_t i = 0; i < len && p[i]; i++) glyph[i] = (char)p[i];
+
+    char candidate[96];
+    memcpy(candidate, out[row], colBytes);
+    memcpy(candidate + colBytes, glyph, len);
+    candidate[colBytes + len] = 0;
+
+    if (colBytes > 0 && spr.textWidth(candidate) > maxPx) {
+      out[row][colBytes] = 0;
+      if (++row >= maxRows) return row;
+      out[row][0] = 0;
+      colBytes = 0;
+      continue;
+    }
+
+    memcpy(out[row] + colBytes, glyph, len);
+    colBytes += len;
+    out[row][colBytes] = 0;
+    p += len;
+  }
+
+  return out[row][0] ? row + 1 : row;
+}
+
+static uint8_t drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color, int maxPx = 124, int lineHeight = 14) {
+  char lines[12][96] = {{0}};
+  uint8_t rows = 0;
+  spr.setFont(interactiveTextFont(text));
+  spr.setTextSize(1);
+  if (containsNonAscii(text)) {
+    rows = wrapIntoCenteredUtf8(text ? text : "", lines, maxRows, maxPx);
+  } else {
+    char asciiLines[12][24] = {{0}};
+    rows = wrapIntoCenteredWords(text ? text : "", asciiLines, maxRows, maxPx);
+    for (uint8_t i = 0; i < rows; i++) snprintf(lines[i], sizeof(lines[i]), "%s", asciiLines[i]);
+  }
   spr.setTextColor(color, characterPalette().bg);
-  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], W / 2, topY + i * 16);
+  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], W / 2, topY + i * lineHeight);
+  restoreDefaultUiFont();
+  return rows;
 }
 
 static void drawInteractive() {
   const Palette& p = characterPalette();
-  const int AREA = 92;
   uint8_t totalPages = interactivePageCount();
   if (interactivePage >= totalPages) interactivePage = 0;
 
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.drawFastHLine(0, H - AREA, W, p.textDim);
-  spr.setTextSize(1);
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(4, H - AREA + 4);
-  spr.print("input needed");
-  spr.setCursor(W - 30, H - AREA + 4);
-  spr.printf("%u/%u", interactivePage + 1, totalPages);
-
-  spr.setTextSize(2);
-  spr.setTextDatum(MC_DATUM);
-
   if (interactivePage == 0) {
-    spr.setTextColor(p.text, p.bg);
-    spr.drawString("extra input", W / 2, H - AREA + 26);
+    const int AREA = 94;
+    uint8_t questionCount = tama.interactiveQuestionTotal ? tama.interactiveQuestionTotal : tama.interactiveQuestionCount;
+    spr.fillRect(0, H - AREA, W, AREA, p.bg);
+    spr.drawFastHLine(0, H - AREA, W, p.textDim);
+
+    spr.setTextDatum(TL_DATUM);
     spr.setTextSize(1);
     spr.setTextColor(p.textDim, p.bg);
-    spr.drawString("B: next page", W / 2, H - AREA + 50);
-    spr.drawString("A: continue", W / 2, H - AREA + 64);
+    spr.setCursor(4, H - AREA + 4);
+    spr.print("input needed");
+    spr.setCursor(W - 30, H - AREA + 4);
+    spr.printf("%u/%u", interactivePage + 1, totalPages);
+
+    spr.setTextDatum(MC_DATUM);
+    spr.setTextSize(2);
+    spr.setTextColor(p.text, p.bg);
+    spr.drawString("extra input", W / 2, H - AREA + 24);
+
+    spr.setTextSize(1);
+    char detail[48];
+    snprintf(detail, sizeof(detail), "%u question%s from Codex", questionCount, questionCount == 1 ? "" : "s");
+    spr.setTextColor(p.body, p.bg);
+    spr.drawString(detail, W / 2, H - AREA + 46);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("B: next page", W / 2, H - 20);
+    spr.drawString("A: continue", W / 2, H - 8);
     spr.setTextDatum(TL_DATUM);
     return;
   }
+
+  spr.fillRect(0, 0, W, H, p.bg);
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextSize(1);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString(String(interactivePage + 1) + "/" + String(totalPages), W / 2, 8);
+  spr.drawFastHLine(0, 20, W, p.textDim);
 
   uint8_t questionIndex = 0;
   int8_t optionIndex = -1;
   int pageType = interactivePageForQuestion(interactivePage, &questionIndex, &optionIndex);
   if (pageType == 1) {
-    spr.setTextSize(1);
-    spr.setTextColor(p.body, p.bg);
-    spr.drawString(tama.interactiveHeaders[questionIndex], W / 2, H - AREA + 18);
-    drawCenteredWrappedBlock(tama.interactiveQuestions[questionIndex], H - AREA + 34, 3, p.text);
+    char qLabel[24];
+    snprintf(qLabel, sizeof(qLabel), "Q%u", tama.interactiveQuestionIndex + 1);
+    drawCenteredWrappedBlock(qLabel, 30, 1, p.body, 60, 14);
+    drawCenteredWrappedBlock(tama.interactiveHeaders[questionIndex], 48, 2, p.body, 124, 14);
+    drawCenteredWrappedBlock(tama.interactiveQuestions[questionIndex], 84, 9, p.text, 126, 15);
     spr.setTextColor(p.textDim, p.bg);
-    spr.drawString("A/B: next", W / 2, H - 12);
+    spr.drawString("A/B: next", W / 2, 228);
     spr.setTextDatum(TL_DATUM);
     return;
   }
 
   if (pageType == 2) {
-    spr.setTextSize(1);
-    spr.setTextColor(p.body, p.bg);
-    char head[40];
-    snprintf(head, sizeof(head), "%s %u/%u", tama.interactiveHeaders[questionIndex], questionIndex + 1, tama.interactiveQuestionCount);
-    spr.drawString(head, W / 2, H - AREA + 18);
-    drawCenteredWrappedBlock(tama.interactiveOptions[questionIndex][optionIndex], H - AREA + 34, 2, p.text);
+    char head[64];
+    char optionLetter = (char)('A' + optionIndex);
+    bool pending = interactiveSubmissionPending();
+    snprintf(head, sizeof(head), "%c of Q%u", optionLetter, tama.interactiveQuestionIndex + 1);
+    drawCenteredWrappedBlock(head, 30, 1, p.body, 110, 14);
+    drawCenteredWrappedBlock(tama.interactiveOptions[questionIndex][optionIndex], 72, 8, p.text, 124, 16);
     spr.setTextColor(p.textDim, p.bg);
-    if (interactiveAnswers[questionIndex] == optionIndex) spr.drawString("selected", W / 2, H - 24);
-    spr.drawString("B: next  A: choose", W / 2, H - 12);
+    if (pending) spr.drawString("sending...", W / 2, 210);
+    else if (interactiveAnswers[questionIndex] == optionIndex) spr.drawString("selected", W / 2, 210);
+    spr.drawString(pending ? "waiting for host" : "B: next  A: choose", W / 2, 228);
     spr.setTextDatum(TL_DATUM);
     return;
   }
@@ -1409,6 +1512,7 @@ void loop() {
   if (strcmp(tama.interactiveId, lastInteractiveId) != 0) {
     strncpy(lastInteractiveId, tama.interactiveId, sizeof(lastInteractiveId)-1);
     lastInteractiveId[sizeof(lastInteractiveId)-1] = 0;
+    lastInteractiveQuestionIndex = tama.interactiveQuestionIndex;
     resetInteractiveAnswers();
     if (tama.interactiveId[0] != 0 && interactiveUiEnabled()) {
       wake();
@@ -1418,6 +1522,16 @@ void loop() {
       characterInvalidate();
       if (buddyMode) buddyInvalidate();
     }
+  } else if (tama.interactiveId[0] != 0 && tama.interactiveQuestionIndex != lastInteractiveQuestionIndex) {
+    lastInteractiveQuestionIndex = tama.interactiveQuestionIndex;
+    interactivePage = 1;
+    interactiveSubmitting = false;
+    interactiveAnswers[0] = -1;
+    wake();
+  } else if (tama.interactiveId[0] != 0 && interactiveSubmitting && !interactiveHostSubmitting()) {
+    interactiveSubmitting = false;
+  } else if (tama.interactiveId[0] == 0) {
+    interactiveSubmitting = false;
   }
 
   bool inPrompt = promptActive();
@@ -1481,6 +1595,9 @@ void loop() {
         beep(2400, 60);
         if (tookS < 5) triggerOneShot(P_HEART, 2000);
       } else if (inInteractive) {
+        if (interactiveSubmissionPending()) {
+          beep(1200, 20);
+        } else {
         uint8_t qIndex = 0;
         int8_t oIndex = -1;
         int pageType = interactivePageForQuestion(interactivePage, &qIndex, &oIndex);
@@ -1490,16 +1607,9 @@ void loop() {
         } else if (pageType == 2 && oIndex >= 0) {
           beep(2400, 40);
           interactiveAnswers[qIndex] = oIndex;
-          uint8_t nextQuestion = interactiveFirstUnansweredQuestion();
-          if (nextQuestion >= tama.interactiveQuestionCount) {
-            sendInteractiveSelection();
-            tama.interactiveId[0] = 0;
-            tama.interactiveQuestionCount = 0;
-            tama.sessionsWaiting = 0;
-            interactiveAlertLatched = false;
-          } else {
-            interactiveJumpToQuestion(nextQuestion);
-          }
+          interactiveSubmitting = true;
+          sendInteractiveSelection(tama.interactiveQuestionIndex, (uint8_t)oIndex);
+        }
         }
       } else if (resetOpen) {
         beep(1800, 30);
@@ -1543,8 +1653,10 @@ void loop() {
        statsOnDenial();
       beep(600, 60);
     } else if (inInteractive) {
-      beep(2400, 30);
-      interactivePage = (interactivePage + 1) % interactivePageCount();
+      if (!interactiveSubmissionPending()) {
+        beep(2400, 30);
+        interactivePage = (interactivePage + 1) % interactivePageCount();
+      }
     } else if (resetOpen) {
       beep(2400, 30);
       applyReset(resetSel);
