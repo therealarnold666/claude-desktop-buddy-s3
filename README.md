@@ -21,6 +21,13 @@
 > first flash, `ARDUINO_USB_CDC_ON_BOOT=1` usually lets subsequent uploads
 > reset into download mode automatically.
 
+## Related Repository
+
+- Bridge repo: [`therealarnold666/codex-buddy-bridge`](https://github.com/therealarnold666/codex-buddy-bridge)
+- This firmware repo owns the StickS3 device side (UI/animation/power/BLE peripheral).
+- The bridge repo owns host-side hooks, daemon state model, and approval workflow integration with Codex.
+- Both repos are designed to run together over BLE NUS + JSON snapshots.
+
 ## Additional Delta In This Branch
 
 Beyond the baseline S3 port, this branch also includes behavior and power
