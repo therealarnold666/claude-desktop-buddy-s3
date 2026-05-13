@@ -85,6 +85,16 @@ inline void statsOnBridgeTokens(uint32_t delta) {
   _dirty = true; statsSave();
 }
 
+inline void statsSyncLifetimeTokens(uint32_t total) {
+  if (total <= _stats.tokens) return;
+  uint8_t lvlBefore = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
+  _stats.tokens = total;
+  uint8_t lvlAfter = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
+  if (lvlAfter > lvlBefore) _levelUpPending = true;
+  _stats.level = lvlAfter;
+  _dirty = true; statsSave();
+}
+
 inline bool statsPollLevelUp() {
   bool r = _levelUpPending;
   _levelUpPending = false;

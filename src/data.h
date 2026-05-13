@@ -127,6 +127,8 @@ static void _applyJson(const char* line, TamaState* out) {
   out->recentlyCompleted = doc["completed"] | false;
   uint32_t bridgeTokens = doc["tokens"] | 0;
   if (doc["tokens"].is<uint32_t>()) statsOnBridgeTokens(bridgeTokens);
+  uint32_t bridgeTotalTokens = doc["tokens_total"] | 0;
+  if (doc["tokens_total"].is<uint32_t>()) statsSyncLifetimeTokens(bridgeTotalTokens);
   out->tokensToday = doc["tokens_today"] | out->tokensToday;
   const char* m = doc["msg"];
   if (m) { strncpy(out->msg, m, sizeof(out->msg)-1); out->msg[sizeof(out->msg)-1]=0; }
