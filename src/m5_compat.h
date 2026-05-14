@@ -27,6 +27,12 @@ inline float vbusVoltageV() {
   int mv = M5.Power.getVBUSVoltage();
   return mv > 0 ? mv / 1000.0f : 0.0f;
 }
+inline bool usbPresent() {
+  int mv = M5.Power.getVBUSVoltage();
+  if (mv > 1000) return true;
+  auto charging = M5.Power.isCharging();
+  return charging != m5::Power_Class::is_discharging;
+}
 inline int chipTempC() { return (int)temperatureRead(); }
 inline void getAccel(float* ax, float* ay, float* az) {
   M5.Imu.getAccel(ax, ay, az);

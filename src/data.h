@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include "ble_bridge.h"
 #include "xfer.h"
 
@@ -15,6 +16,10 @@ struct TamaState {
   uint8_t  sessionsWaiting;
   bool     recentlyCompleted;
   uint32_t tokensToday;
+  uint8_t  usage5hRemaining;
+  uint8_t  usageWeekRemaining;
+  uint32_t usage5hResetAt;
+  uint32_t usageWeekResetAt;
   uint32_t lastUpdated;
   char     msg[24];
   bool     connected;
@@ -38,6 +43,19 @@ struct TamaState {
   char     interactiveOptions[INTERACTIVE_Q_MAX][INTERACTIVE_OPT_MAX][INTERACTIVE_OPTION_BYTES];
 };
 
+struct PersistedTamaState {
+  uint8_t  sessionsTotal;
+  uint8_t  sessionsRunning;
+  uint32_t tokensToday;
+  uint8_t  usage5hRemaining;
+  uint8_t  usageWeekRemaining;
+  uint32_t usage5hResetAt;
+  uint32_t usageWeekResetAt;
+  char     msg[24];
+  char     lines[8][92];
+  uint8_t  nLines;
+};
+
 // ---------------------------------------------------------------------------
 // Three modes, checked in priority order:
 //   demo   → auto-cycle fake scenarios every 8s, ignore live data
@@ -51,6 +69,10 @@ static constexpr uint32_t LIVE_TIMEOUT_MS = 20UL * 60UL * 1000UL;
 static bool     _demoMode   = false;
 static uint8_t  _demoIdx    = 0;
 static uint32_t _demoNext   = 0;
+static bool     _bootRestoreActive = false;
+static bool     _cacheValid = false;
+static Preferences _dataPrefs;
+static PersistedTamaState _persistedState;
 
 struct _Fake { const char* n; uint8_t t,r,w; bool c; uint32_t tok; };
 static const _Fake _FAKES[] = {
@@ -67,6 +89,67 @@ inline bool dataDemo() { return _demoMode; }
 
 inline bool dataConnected() {
   return _lastLiveMs != 0 && (millis() - _lastLiveMs) <= LIVE_TIMEOUT_MS;
+}
+
+static void _copyToPersisted(const TamaState* in, PersistedTamaState* out) {
+  out->sessionsTotal = in->sessionsTotal;
+  out->sessionsRunning = in->sessionsRunning;
+  out->tokensToday = in->tokensToday;
+  out->usage5hRemaining = in->usage5hRemaining;
+  out->usageWeekRemaining = in->usageWeekRemaining;
+  out->usage5hResetAt = in->usage5hResetAt;
+  out->usageWeekResetAt = in->usageWeekResetAt;
+  strncpy(out->msg, in->msg, sizeof(out->msg) - 1); out->msg[sizeof(out->msg) - 1] = 0;
+  memcpy(out->lines, in->lines, sizeof(out->lines));
+  out->nLines = in->nLines;
+}
+
+static void _copyFromPersisted(const PersistedTamaState* in, TamaState* out) {
+  out->sessionsTotal = in->sessionsTotal;
+  out->sessionsRunning = in->sessionsRunning;
+  out->sessionsWaiting = 0;
+  out->recentlyCompleted = false;
+  out->tokensToday = in->tokensToday;
+  out->usage5hRemaining = in->usage5hRemaining;
+  out->usageWeekRemaining = in->usageWeekRemaining;
+  out->usage5hResetAt = in->usage5hResetAt;
+  out->usageWeekResetAt = in->usageWeekResetAt;
+  strncpy(out->msg, in->msg, sizeof(out->msg) - 1); out->msg[sizeof(out->msg) - 1] = 0;
+  memcpy(out->lines, in->lines, sizeof(out->lines));
+  out->nLines = in->nLines;
+  out->promptId[0] = 0; out->promptTool[0] = 0; out->promptHint[0] = 0;
+  out->interactiveId[0] = 0; out->interactiveCallId[0] = 0; out->interactiveTurnId[0] = 0;
+  out->interactiveStatus[0] = 0;
+  out->interactiveQuestionIndex = 0; out->interactiveQuestionTotal = 0; out->interactiveQuestionCount = 0;
+  for (uint8_t qi = 0; qi < TamaState::INTERACTIVE_Q_MAX; qi++) {
+    out->interactiveQuestionIds[qi][0] = 0;
+    out->interactiveHeaders[qi][0] = 0;
+    out->interactiveQuestions[qi][0] = 0;
+    out->interactiveOptionCounts[qi] = 0;
+    for (uint8_t oi = 0; oi < TamaState::INTERACTIVE_OPT_MAX; oi++) out->interactiveOptions[qi][oi][0] = 0;
+  }
+}
+
+inline void dataLoadCache(TamaState* out) {
+  _dataPrefs.begin("buddy", true);
+  size_t got = _dataPrefs.getBytes("hostsnap", &_persistedState, sizeof(_persistedState));
+  _dataPrefs.end();
+  if (got != sizeof(_persistedState)) return;
+  _copyFromPersisted(&_persistedState, out);
+  out->lastUpdated = millis();
+  _cacheValid = true;
+  _bootRestoreActive = true;
+}
+
+static void _saveCacheIfChanged(const TamaState* out) {
+  PersistedTamaState next{};
+  _copyToPersisted(out, &next);
+  if (_cacheValid && memcmp(&next, &_persistedState, sizeof(next)) == 0) return;
+  _dataPrefs.begin("buddy", false);
+  _dataPrefs.putBytes("hostsnap", &next, sizeof(next));
+  _dataPrefs.end();
+  _persistedState = next;
+  _cacheValid = true;
 }
 
 inline bool dataBtActive() {
@@ -130,6 +213,19 @@ static void _applyJson(const char* line, TamaState* out) {
   uint32_t bridgeTotalTokens = doc["tokens_total"] | 0;
   if (doc["tokens_total"].is<uint32_t>()) statsSyncLifetimeTokens(bridgeTotalTokens);
   out->tokensToday = doc["tokens_today"] | out->tokensToday;
+  JsonObject usage = doc["usage"];
+  if (!usage.isNull()) {
+    JsonObject fiveHour = usage["five_hour"];
+    if (!fiveHour.isNull()) {
+      out->usage5hRemaining = fiveHour["remaining_percent"] | out->usage5hRemaining;
+      out->usage5hResetAt = fiveHour["resets_at"] | out->usage5hResetAt;
+    }
+    JsonObject weekly = usage["weekly"];
+    if (!weekly.isNull()) {
+      out->usageWeekRemaining = weekly["remaining_percent"] | out->usageWeekRemaining;
+      out->usageWeekResetAt = weekly["resets_at"] | out->usageWeekResetAt;
+    }
+  }
   const char* m = doc["msg"];
   if (m) { strncpy(out->msg, m, sizeof(out->msg)-1); out->msg[sizeof(out->msg)-1]=0; }
   JsonArray la = doc["entries"];
@@ -223,6 +319,8 @@ static void _applyJson(const char* line, TamaState* out) {
   }
   out->lastUpdated = millis();
   _lastLiveMs = millis();
+  _bootRestoreActive = false;
+  _saveCacheIfChanged(out);
 }
 
 template<size_t N>
@@ -275,7 +373,8 @@ inline void dataPoll(TamaState* out) {
     }
   }
 
-  out->connected = dataConnected();
+  bool live = dataConnected();
+  out->connected = live || _bootRestoreActive;
   if (!out->connected) {
     out->sessionsTotal=0; out->sessionsRunning=0; out->sessionsWaiting=0;
     out->recentlyCompleted=false; out->lastUpdated=now;

@@ -191,6 +191,13 @@ static void beepInteractiveAlert() {
   compat::beep(1200, 50);
 }
 
+static void beepWorkComplete() {
+  if (!settings().sound) return;
+  compat::beep(1600, 45);
+  delay(35);
+  compat::beep(2200, 70);
+}
+
 struct BatteryUiState {
   bool initialized = false;
   uint32_t lastSampleMs = 0;
@@ -491,7 +498,7 @@ static bool            _onUsb       = false;
 static void clockRefreshRtc() {
   if (millis() - _clkLastRead < 1000) return;
   _clkLastRead = millis();
-  _onUsb = compat::vbusVoltageV() > 4.0f;
+  _onUsb = compat::usbPresent();
   if (_clkEpochValid) {
     time_t cur = _clkEpochLocal + (time_t)((millis() - _clkEpochSetMs) / 1000);
     struct tm lt;
@@ -1154,59 +1161,132 @@ static void tinyHeart(int x, int y, bool filled, uint16_t col) {
   }
 }
 
+static void formatCompactValue(uint32_t value, char* out, size_t outLen) {
+  if (value >= 1000000UL) snprintf(out, outLen, "%lu.%luM", value / 1000000UL, (value / 100000UL) % 10UL);
+  else if (value >= 1000UL) snprintf(out, outLen, "%lu.%luK", value / 1000UL, (value / 100UL) % 10UL);
+  else snprintf(out, outLen, "%lu", value);
+}
+
+static void drawUsageBar(int x, int y, int w, int h, uint8_t pct, uint16_t fill, uint16_t border) {
+  spr.drawRoundRect(x, y, w, h, 4, border);
+  spr.fillRoundRect(x + 1, y + 1, w - 2, h - 2, 3, TFT_BLACK);
+  int inner = w - 4;
+  int fillW = (inner * pct) / 100;
+  if (fillW > 0) spr.fillRoundRect(x + 2, y + 2, fillW, h - 4, 2, fill);
+}
+
+static void drawUsageCard(
+  const Palette& p, int x, int y, int w, const char* label, const char* sublabel,
+  uint8_t pct, uint16_t accent
+) {
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextSize(1);
+  spr.setTextColor(p.textDim, p.bg);
+  char titleBuf[24];
+  snprintf(titleBuf, sizeof(titleBuf), "%s %s", label, sublabel);
+  spr.drawString(titleBuf, x, y);
+
+  spr.setTextDatum(TR_DATUM);
+  spr.setTextColor(accent, p.bg);
+  char pctBuf[8];
+  snprintf(pctBuf, sizeof(pctBuf), "%u%%", pct);
+  spr.drawString(pctBuf, x + w, y);
+
+  drawUsageBar(x, y + 12, w, 9, pct, accent, p.textDim);
+}
+
+static void formatResetTime(uint32_t resetEpoch, char* out, size_t outLen) {
+  if (resetEpoch == 0) {
+    snprintf(out, outLen, "--");
+    return;
+  }
+  time_t t = (time_t)resetEpoch;
+  struct tm lt;
+  gmtime_r(&t, &lt);
+  snprintf(out, outLen, "%02d/%02d %02d:%02d", lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min);
+}
+
 static void drawPetStats(const Palette& p) {
   const int TOP = 70;
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  spr.setTextDatum(TL_DATUM);
   spr.setTextSize(1);
+
+  const int cardX = 6;
+  const int cardW = W - 12;
   int y = TOP + 16;
 
-  spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(6, y - 2); spr.print("mood");
   uint8_t mood = statsMoodTier();
   uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
-  for (int i = 0; i < 4; i++) tinyHeart(54 + i * 16, y + 2, i < mood, moodCol);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString("mood", cardX, y);
+  for (int i = 0; i < 4; i++) tinyHeart(cardX + 40 + i * 15, y + 3, i < mood, moodCol);
 
-  y += 20;
-  spr.setCursor(6, y - 2); spr.print("fed");
+  y += 16;
+  uint16_t usageCol5h = (tama.usage5hRemaining < 20) ? HOT : p.body;
+  drawUsageCard(
+    p, cardX, y, cardW, "usage", "5h",
+    tama.usage5hRemaining, usageCol5h
+  );
+
+  y += 28;
+  uint16_t usageCol1w = (tama.usageWeekRemaining < 20) ? HOT : p.body;
+  drawUsageCard(
+    p, cardX, y, cardW, "usage", "1w",
+    tama.usageWeekRemaining, usageCol1w
+  );
+
+  y += 30;
+  spr.fillRoundRect(6, y - 2, 48, 14, 3, p.body);
+  spr.setTextColor(p.bg, p.body);
+  spr.setTextDatum(MC_DATUM);
+  char levelBuf[12];
+  snprintf(levelBuf, sizeof(levelBuf), "Lv.%u", stats().level);
+  spr.drawString(levelBuf, 30, y + 4);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(p.textDim, p.bg);
   uint8_t fed = statsFedProgress();
   for (int i = 0; i < 10; i++) {
-    int px = 38 + i * 9;
-    if (i < fed) spr.fillCircle(px, y + 1, 2, p.body);
-    else spr.drawCircle(px, y + 1, 2, p.textDim);
+    int px = 72 + i * 6;
+    if (i < fed) spr.fillCircle(px, y + 4, 2, p.body);
+    else spr.drawCircle(px, y + 4, 2, p.textDim);
   }
 
   y += 20;
-  spr.setCursor(6, y - 2); spr.print("energy");
-  uint8_t en = statsEnergyTier();
-  uint16_t enCol = (en >= 4) ? 0x07FF : (en >= 2) ? 0xFFE0 : HOT;
-  for (int i = 0; i < 5; i++) {
-    int px = 54 + i * 13;
-    if (i < en) spr.fillRect(px, y - 2, 9, 6, enCol);
-    else spr.drawRect(px, y - 2, 9, 6, p.textDim);
-  }
-
-  y += 24;
-  spr.fillRoundRect(6, y - 2, 42, 14, 3, p.body);
-  spr.setTextColor(p.bg, p.body);
-  spr.setCursor(11, y + 1); spr.printf("Lv %u", stats().level);
-
-  y += 20;
+  spr.setTextDatum(TL_DATUM);
+  const int leftX = 18;
+  const int rightX = 76;
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(6, y);
-  spr.printf("approved %u", stats().approvals);
-  spr.setCursor(6, y + 10);
-  spr.printf("denied   %u", stats().denials);
+  spr.drawString("total", leftX, y);
+  spr.drawString("today", rightX, y);
+  spr.drawString("yes/no", leftX, y + 22);
+  spr.drawString("napped", rightX, y + 22);
+
+  char totalBuf[16];
+  char todayBuf[16];
+  formatCompactValue(stats().tokens, totalBuf, sizeof(totalBuf));
+  formatCompactValue(tama.tokensToday, todayBuf, sizeof(todayBuf));
+  spr.setTextColor(p.text, p.bg);
+  spr.drawString(totalBuf, leftX, y + 10);
+  spr.drawString(todayBuf, rightX, y + 10);
+  char decisionBuf[16];
+  snprintf(decisionBuf, sizeof(decisionBuf), "%u/%u", stats().approvals, stats().denials);
+  spr.drawString(decisionBuf, leftX, y + 32);
   uint32_t nap = stats().napSeconds;
-  spr.setCursor(6, y + 20);
-  spr.printf("napped   %luh%02lum", nap/3600, (nap/60)%60);
-  auto tokFmt = [&](const char* label, uint32_t v, int yPx) {
-    spr.setCursor(6, yPx);
-    if (v >= 1000000)   spr.printf("%s%lu.%luM", label, v/1000000, (v/100000)%10);
-    else if (v >= 1000) spr.printf("%s%lu.%luK", label, v/1000, (v/100)%10);
-    else                spr.printf("%s%lu", label, v);
-  };
-  tokFmt("tokens   ", stats().tokens, y + 30);
-  tokFmt("today    ", tama.tokensToday, y + 40);
+  char napBuf[16];
+  snprintf(napBuf, sizeof(napBuf), "%luh%02lum", nap / 3600UL, (nap / 60UL) % 60UL);
+  spr.drawString(napBuf, rightX, y + 32);
+
+  y += 44;
+  char weekReset[20];
+  formatResetTime(tama.usageWeekResetAt, weekReset, sizeof(weekReset));
+  spr.setTextColor(p.textDim, p.bg);
+  spr.drawString("refresh", leftX, y);
+  spr.setTextDatum(TL_DATUM);
+  spr.setTextColor(p.text, p.bg);
+  spr.drawString(weekReset, 64, y);
+  spr.setTextDatum(TL_DATUM);
 }
 
 static void drawPetHowTo(const Palette& p) {
@@ -1225,13 +1305,13 @@ static void drawPetHowTo(const Palette& p) {
   ln(p.textDim, " approve fast = up");
   ln(p.textDim, " deny lots = down"); gap();
 
-  ln(p.body,    "FED");
+  ln(p.body,    "USAGE");
+  ln(p.textDim, " 5h = codex left");
+  ln(p.textDim, " week = quota left"); gap();
+
+  ln(p.body,    "LEVEL");
   ln(p.textDim, " 50K tokens =");
   ln(p.textDim, " level up + confetti"); gap();
-
-  ln(p.body,    "ENERGY");
-  ln(p.textDim, " face-down to nap");
-  ln(p.textDim, " refills to full"); gap();
 
   ln(p.textDim, "idle 30s = off");
   ln(p.textDim, "any button = wake"); gap();
@@ -1344,6 +1424,7 @@ void setup() {
   statsLoad();
   settingsLoad();
   petNameLoad();
+  dataLoadCache(&tama);
 
   // BLE stays always-on; s.bt is stored as a preference only.
   spr.setColorDepth(16);
@@ -1395,6 +1476,9 @@ void loop() {
   if (statsPollLevelUp()) triggerOneShot(P_CELEBRATE, 3000);
   baseState = derive(tama);
   if (baseState == P_BUSY && lastBaseState != P_BUSY) wake();
+  if (baseState == P_IDLE && lastBaseState == P_BUSY && !promptActive() && !interactiveActive()) {
+    beepWorkComplete();
+  }
   if (baseState == P_IDLE) {
     if (idleStartedMs == 0) idleStartedMs = now;
   } else {
@@ -1730,8 +1814,17 @@ void loop() {
   // - idle: 30s inactivity -> screen off
   // - busy / approval: 30s inactivity -> minimum visible brightness
   // - sleep: 10s inactivity -> screen off
-  // USB power disables all automatic dim/off behavior.
-  if (!_onUsb) {
+  // USB power forces the display to stay awake at normal brightness.
+  if (_onUsb) {
+    if (screenOff) {
+      compat::screenPower(true);
+      screenOff = false;
+    }
+    if (dimmed) {
+      applyBrightness();
+      dimmed = false;
+    }
+  } else {
     uint32_t inactiveMs = millis() - lastInteractMs;
     bool wantsDim = false;
     bool wantsOff = false;
@@ -1757,9 +1850,6 @@ void loop() {
       applyBrightness();
       dimmed = false;
     }
-  } else if (!screenOff && dimmed) {
-    applyBrightness();
-    dimmed = false;
   }
 
   bool wantsAdvertising = true;

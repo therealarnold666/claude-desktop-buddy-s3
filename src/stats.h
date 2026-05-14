@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <Preferences.h>
+#include <time.h>
 
 // Header-only with file-static state: include from exactly one translation
 // unit (main.cpp). Including from a second .cpp produces duplicate symbols.
@@ -10,6 +11,10 @@
 // only — approval, denial, nap end — never on a timer.
 
 static const uint32_t TOKENS_PER_LEVEL = 50000;
+static const uint32_t USAGE_5H_TARGET_TOKENS = 20000;
+static const uint32_t USAGE_WEEK_TARGET_TOKENS = 150000;
+static const uint32_t USAGE_WEEK_SECONDS = 7UL * 24UL * 3600UL;
+static const uint8_t  USAGE_5H_BUCKETS = 5;
 
 struct Stats {
   uint32_t napSeconds;       // cumulative face-down time
@@ -20,11 +25,43 @@ struct Stats {
   uint8_t  velCount;
   uint8_t  level;
   uint32_t tokens;          // cumulative output tokens, drives level
+  uint32_t usage5hHour[USAGE_5H_BUCKETS];
+  uint32_t usage5hTokens[USAGE_5H_BUCKETS];
+  uint32_t usageWeekStart;
+  uint32_t usageWeekTokens;
 };
 
 static Stats _stats;
 static Preferences _prefs;
 static bool _dirty = false;
+
+inline uint32_t statsNowLocalEpoch() {
+  extern time_t _clkEpochLocal;
+  extern uint32_t _clkEpochSetMs;
+  extern bool _clkEpochValid;
+  if (!_clkEpochValid) return 0;
+  return (uint32_t)(_clkEpochLocal + (time_t)((millis() - _clkEpochSetMs) / 1000));
+}
+
+inline uint32_t statsWeekStartForEpoch(uint32_t epochLocal) {
+  if (epochLocal == 0) return 0;
+  time_t t = (time_t)epochLocal;
+  struct tm lt;
+  gmtime_r(&t, &lt);
+  uint32_t dayStart = epochLocal - (uint32_t)(lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec);
+  uint8_t daysSinceMonday = (uint8_t)((lt.tm_wday + 6) % 7);
+  return dayStart - (uint32_t)daysSinceMonday * 86400UL;
+}
+
+inline void statsRefreshWeekUsage(uint32_t nowLocal) {
+  if (nowLocal == 0) return;
+  uint32_t weekStart = statsWeekStartForEpoch(nowLocal);
+  if (_stats.usageWeekStart != weekStart) {
+    _stats.usageWeekStart = weekStart;
+    _stats.usageWeekTokens = 0;
+    _dirty = true;
+  }
+}
 
 inline void statsLoad() {
   _prefs.begin("buddy", true);
@@ -35,8 +72,14 @@ inline void statsLoad() {
   _stats.velCount   = _prefs.getUChar("vcnt", 0);
   _stats.level      = _prefs.getUChar("lvl", 0);
   _stats.tokens     = _prefs.getUInt("tok", 0);
+  _stats.usageWeekStart = _prefs.getUInt("uws", 0);
+  _stats.usageWeekTokens = _prefs.getUInt("uwt", 0);
   size_t got = _prefs.getBytes("vel", _stats.velocity, sizeof(_stats.velocity));
   if (got != sizeof(_stats.velocity)) memset(_stats.velocity, 0, sizeof(_stats.velocity));
+  got = _prefs.getBytes("u5hh", _stats.usage5hHour, sizeof(_stats.usage5hHour));
+  if (got != sizeof(_stats.usage5hHour)) memset(_stats.usage5hHour, 0, sizeof(_stats.usage5hHour));
+  got = _prefs.getBytes("u5ht", _stats.usage5hTokens, sizeof(_stats.usage5hTokens));
+  if (got != sizeof(_stats.usage5hTokens)) memset(_stats.usage5hTokens, 0, sizeof(_stats.usage5hTokens));
   _prefs.end();
   // Level is derived from tokens; if NVS has level set but tokens at 0,
   // backfill so the derivation holds.
@@ -55,7 +98,11 @@ inline void statsSave() {
   _prefs.putUChar("vcnt", _stats.velCount);
   _prefs.putUChar("lvl", _stats.level);
   _prefs.putUInt("tok", _stats.tokens);
+  _prefs.putUInt("uws", _stats.usageWeekStart);
+  _prefs.putUInt("uwt", _stats.usageWeekTokens);
   _prefs.putBytes("vel", _stats.velocity, sizeof(_stats.velocity));
+  _prefs.putBytes("u5hh", _stats.usage5hHour, sizeof(_stats.usage5hHour));
+  _prefs.putBytes("u5ht", _stats.usage5hTokens, sizeof(_stats.usage5hTokens));
   _prefs.end();
   _dirty = false;
 }
@@ -82,6 +129,20 @@ inline void statsOnBridgeTokens(uint32_t delta) {
   uint8_t lvlAfter = (uint8_t)(_stats.tokens / TOKENS_PER_LEVEL);
   if (lvlAfter > lvlBefore) _levelUpPending = true;
   _stats.level = lvlAfter;
+
+  uint32_t nowLocal = statsNowLocalEpoch();
+  if (nowLocal != 0) {
+    statsRefreshWeekUsage(nowLocal);
+    _stats.usageWeekTokens += delta;
+
+    uint32_t hourSlot = nowLocal / 3600UL;
+    uint8_t idx = (uint8_t)(hourSlot % USAGE_5H_BUCKETS);
+    if (_stats.usage5hHour[idx] != hourSlot) {
+      _stats.usage5hHour[idx] = hourSlot;
+      _stats.usage5hTokens[idx] = 0;
+    }
+    _stats.usage5hTokens[idx] += delta;
+  }
   _dirty = true; statsSave();
 }
 
@@ -144,60 +205,61 @@ inline uint8_t statsMoodTier() {
   return (uint8_t)tier;
 }
 
-// Energy: starts at 3/5 on boot. A real sleep lasting 30m+ restores it to
-// full when the buddy wakes, then it drains 1 tier per 2h.
-static uint32_t _lastWakeMs = 0;
-static uint8_t  _energyAtWake  = 3;
-static uint32_t _usbIdleRecoverStartMs = 0;
-static uint8_t  _usbIdleRecoveredSteps = 0;
-
-inline void statsOnWake() { _lastWakeMs = millis(); _energyAtWake = 5; }
-
-inline uint8_t statsEnergyTier() {
-  uint32_t hoursSince = (millis() - _lastWakeMs) / 3600000;
-  int8_t e = (int8_t)_energyAtWake - (int8_t)(hoursSince / 2);
-  if (e < 0) e = 0; if (e > 5) e = 5;
-  return (uint8_t)e;
-}
-
-inline void statsResetUsbIdleRecovery() {
-  _usbIdleRecoverStartMs = 0;
-  _usbIdleRecoveredSteps = 0;
-}
-
-inline bool statsPollUsbIdleRecovery(bool active) {
-  if (!active) {
-    statsResetUsbIdleRecovery();
-    return false;
-  }
-
-  uint32_t now = millis();
-  if (_usbIdleRecoverStartMs == 0) {
-    _usbIdleRecoverStartMs = now;
-    _usbIdleRecoveredSteps = 0;
-    return false;
-  }
-
-  uint32_t elapsed = now - _usbIdleRecoverStartMs;
-  uint8_t expectedSteps = (uint8_t)(elapsed / 3600000UL);
-  if (expectedSteps <= _usbIdleRecoveredSteps) return false;
-
-  uint8_t current = statsEnergyTier();
-  if (current >= 5) {
-    _usbIdleRecoveredSteps = expectedSteps;
-    return false;
-  }
-
-  uint8_t next = current + 1;
-  if (next > 5) next = 5;
-  _lastWakeMs = now;
-  _energyAtWake = next;
-  _usbIdleRecoveredSteps++;
-  return true;
-}
+inline void statsOnWake() {}
+inline uint8_t statsEnergyTier() { return 0; }
+inline void statsResetUsbIdleRecovery() {}
+inline bool statsPollUsbIdleRecovery(bool active) { (void)active; return false; }
 
 inline uint8_t statsFedProgress() {
   return (uint8_t)((_stats.tokens % TOKENS_PER_LEVEL) / (TOKENS_PER_LEVEL / 10));
+}
+
+inline uint32_t statsUsage5hTokens() {
+  uint32_t nowLocal = statsNowLocalEpoch();
+  if (nowLocal == 0) return 0;
+  uint32_t nowHour = nowLocal / 3600UL;
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < USAGE_5H_BUCKETS; i++) {
+    uint32_t bucketHour = _stats.usage5hHour[i];
+    if (bucketHour == 0 || bucketHour > nowHour) continue;
+    if (nowHour - bucketHour < USAGE_5H_BUCKETS) total += _stats.usage5hTokens[i];
+  }
+  return total;
+}
+
+inline uint32_t statsUsageWeekTokens() {
+  uint32_t nowLocal = statsNowLocalEpoch();
+  if (nowLocal == 0) return _stats.usageWeekTokens;
+  uint32_t weekStart = statsWeekStartForEpoch(nowLocal);
+  if (_stats.usageWeekStart != weekStart) return 0;
+  return _stats.usageWeekTokens;
+}
+
+inline uint8_t statsUsagePercent(uint32_t value, uint32_t target) {
+  if (target == 0) return 0;
+  uint32_t pct = (value * 100UL) / target;
+  if (pct > 100UL) pct = 100UL;
+  return (uint8_t)pct;
+}
+
+inline uint8_t statsUsage5hPercent() {
+  return statsUsagePercent(statsUsage5hTokens(), USAGE_5H_TARGET_TOKENS);
+}
+
+inline uint8_t statsUsageWeekPercent() {
+  return statsUsagePercent(statsUsageWeekTokens(), USAGE_WEEK_TARGET_TOKENS);
+}
+
+inline uint32_t statsUsageWeekStart() {
+  uint32_t nowLocal = statsNowLocalEpoch();
+  if (nowLocal != 0) return statsWeekStartForEpoch(nowLocal);
+  return _stats.usageWeekStart;
+}
+
+inline uint32_t statsUsageNextWeekResetEpoch() {
+  uint32_t weekStart = statsUsageWeekStart();
+  if (weekStart == 0) return 0;
+  return weekStart + USAGE_WEEK_SECONDS;
 }
 
 // --- Settings --------------------------------------------------------------
