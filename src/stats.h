@@ -271,7 +271,7 @@ struct Settings {
   bool led;
   bool hud;
   bool interactiveQA;
-  uint8_t clockRot;  // 0=auto 1=portrait 2=landscape
+  uint8_t clockRot;  // 0=portrait 1=landscape
 };
 
 static Settings _settings = { true, true, false, true, true, true, 0 };
@@ -285,7 +285,7 @@ inline void settingsLoad() {
   _settings.hud      = _prefs.getBool("s_hud", true);
   _settings.interactiveQA = _prefs.getBool("s_iqa", true);
   _settings.clockRot = _prefs.getUChar("s_crot", 0);
-  if (_settings.clockRot > 2) _settings.clockRot = 0;
+  if (_settings.clockRot > 1) _settings.clockRot = 0;
   _prefs.end();
 }
 

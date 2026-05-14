@@ -43,6 +43,10 @@ model changes for Codex Buddy integration:
   - Codex naming in UI copy
   - Credits page extended with local fork attribution and source block
   - Normal page HUD centering/word-wrap tuning
+  - Separate portrait/landscape UI treatments for `normal`, `pet`, `info`, and clock screens
+  - Landscape `pet/info` first-page compact GIF cards with page-specific text layouts
+  - Landscape menu/settings polish, including rotated hint arrows and scrollable settings list
+  - Portrait `pet/info` GIF behavior restored so all sub-pages keep the classic top animation
 - Interactive waiting UX updates:
   - `input needed` / `choice needed` 进入 `attention` 动画
   - 非 approval 的 interactive 提示使用独立“双短音”（区别于 approval 单短音）
@@ -149,6 +153,24 @@ If discovery isn't finding the stick:
 
 The screen auto-powers-off after 30s of no interaction (kept on while an
 approval prompt is up). Any button press wakes it.
+
+## Rotation Modes
+
+`Settings -> rotation` now provides two explicit UI modes:
+
+- `port`: classic portrait layout
+- `land`: counter-clockwise 90-degree landscape layout with dedicated screen compositions
+
+Landscape mode is not a simple framebuffer rotation. The main screens are
+re-laid out for the 240x135 canvas:
+
+- `normal`: character on the left, status text on the right
+- `pet` / `info`: first page uses a compact photo-card GIF; later pages switch to text-focused layouts
+- `settings`: scrollable list so the menu stays inside the shorter vertical height
+
+Portrait and landscape intentionally diverge in some places. Portrait keeps
+the classic all-pages animated top GIF behavior for `pet` and `info`,
+whereas landscape reserves the compact GIF treatment for page 1 only.
 
 ## ASCII pets
 

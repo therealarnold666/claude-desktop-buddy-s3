@@ -21,9 +21,9 @@ static void startBt() {
 
 #include "character.h"
 #include "stats.h"
-const int W = 135, H = 240;
-const int CX = W / 2;
-const int CY_BASE = 120;
+int W = 135, H = 240;
+int CX = 67;
+int CY_BASE = 120;
 const int LED_PIN = BUDDY_DEFAULT_LED_PIN;   // red LED, active-low (S3: G19)
 
 // Colors used across multiple UI surfaces
@@ -69,6 +69,58 @@ char     lastInteractiveId[32] = "";
 uint8_t  lastInteractiveQuestionIndex = 0;
 bool     interactiveSubmitting = false;
 const uint8_t SPECIES_GIF = 0xFF;   // species NVS sentinel: use the installed GIF
+
+static bool uiLandscape() {
+  return settings().clockRot == 1;
+}
+
+static int contentTop() {
+  return uiLandscape() ? 10 : 70;
+}
+
+static int landscapeSidePanelX() {
+  return 136;
+}
+
+static int landscapeSidePanelW() {
+  return W - landscapeSidePanelX() - 6;
+}
+
+static int landscapePhotoX() { return 20; }
+static int landscapePhotoY() { return 34; }
+static int landscapePhotoW() { return 76; }
+static int landscapePhotoH() { return 92; }
+static int landscapePhotoFrameLeft() { return 0; }
+static int landscapePhotoFrameRight() { return 98; }
+static int landscapePhotoFrameBottom() { return 135; }
+
+static void clearLandscapePhotoSurround(const Palette& p, int top, int bottom) {
+  spr.fillRect(landscapePhotoFrameRight(), top, W - landscapePhotoFrameRight(), bottom - top, p.bg);
+  spr.fillRect(landscapePhotoFrameLeft(), top, landscapePhotoFrameRight(), landscapePhotoY() - top, p.bg);
+  spr.fillRect(landscapePhotoFrameLeft(), landscapePhotoY(), landscapePhotoX() - landscapePhotoFrameLeft(), landscapePhotoH(), p.bg);
+  spr.fillRect(landscapePhotoX() + landscapePhotoW(), landscapePhotoY(),
+               landscapePhotoFrameRight() - (landscapePhotoX() + landscapePhotoW()),
+               landscapePhotoH(), p.bg);
+  spr.fillRect(landscapePhotoFrameLeft(), landscapePhotoY() + landscapePhotoH(),
+               landscapePhotoFrameRight(), bottom - (landscapePhotoY() + landscapePhotoH()), p.bg);
+}
+
+static void configureUiGeometry(bool force = false) {
+  int nextW = uiLandscape() ? 240 : 135;
+  int nextH = uiLandscape() ? 135 : 240;
+  uint8_t rot = uiLandscape() ? 1 : 0;
+  bool changed = force || nextW != W || nextH != H;
+  W = nextW;
+  H = nextH;
+  CX = W / 2;
+  CY_BASE = H / 2;
+  M5.Display.setRotation(rot);
+  if (changed) {
+    if (spr.width() > 0) spr.deleteSprite();
+    spr.setColorDepth(16);
+    spr.createSprite(W, H);
+  }
+}
 
 // Cycle GIF (if installed) → ASCII species 0..N-1 → GIF. Persisted to the
 // existing "species" NVS key; 0xFF means GIF mode.
@@ -159,6 +211,11 @@ static bool interactiveHostSubmitting() {
 static bool interactiveSubmissionPending() {
   return interactiveSubmitting || interactiveHostSubmitting();
 }
+
+static uint8_t drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color, int maxPx = 124, int lineHeight = 14);
+static uint8_t drawWrappedParagraph(const char* text, int x, int y, int maxRows, int maxPx, int lineHeight, uint16_t color);
+static int paragraphLineHeight(const char* text, int baseLineHeight);
+static uint8_t drawBodyWrappedParagraph(const char* text, int x, int y, int maxRows, int maxPx, int lineHeight, uint16_t color);
 
 static uint8_t interactivePageCount() {
   return 1;
@@ -261,7 +318,9 @@ const uint8_t INFO_PG_BUTTONS = 2;
 const uint8_t INFO_PG_CREDITS = 5;
 
 void applyDisplayMode() {
-  bool peek = displayMode != DISP_NORMAL;
+  bool peek = false;
+  if (displayMode == DISP_PET) peek = uiLandscape() ? (petPage == 0) : true;
+  else if (displayMode == DISP_INFO) peek = uiLandscape() ? (infoPage == 0) : true;
   characterSetPeek(peek);
   buddySetPeek(peek);
   // Clear the whole sprite on mode switch. drawInfo/drawPet clear their
@@ -277,7 +336,7 @@ const uint8_t MENU_N = 6;
 
 bool    settingsOpen = false;
 uint8_t settingsSel  = 0;
-const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "interactive qa", "clock rot", "ascii pet", "reset", "back" };
+const char* settingsItems[] = { "brightness", "sound", "bluetooth", "wifi", "led", "transcript", "interactive qa", "rotation", "ascii pet", "reset", "back" };
 const uint8_t SETTINGS_N = 11;
 
 bool    resetOpen = false;
@@ -306,12 +365,16 @@ static void applySetting(uint8_t idx) {
     case 4: s.led = !s.led; break;
     case 5: s.hud = !s.hud; break;
     case 6: s.interactiveQA = !s.interactiveQA; break;
-    case 7: s.clockRot = (s.clockRot + 1) % 3; break;
+    case 7: s.clockRot = (s.clockRot + 1) % 2; break;
     case 8: nextPet(); return;
     case 9: resetOpen = true; resetSel = 0; resetConfirmIdx = 0xFF; return;
     case 10: settingsOpen = false; characterInvalidate(); return;
   }
   settingsSave();
+  if (idx == 7) {
+    configureUiGeometry(true);
+    applyDisplayMode();
+  }
 }
 
 // Tap-twice confirm: first tap arms (label flips to "really?"), second
@@ -369,40 +432,59 @@ static void applyReset(uint8_t idx) {
   ESP.restart();
 }
 
-// Footer hint row inside a menu panel: "<downLbl> ↓  <rightLbl> →" with
-// pixel triangles. Panels add MENU_HINT_H to height and call this at bottom.
+// Footer hint row inside a menu panel.
+// Portrait: "<downLbl> ↓  <rightLbl> →"
+// Landscape: "<downLbl> →  <rightLbl> ↑"
+// Panels add MENU_HINT_H to height and call this at bottom.
 const int MENU_HINT_H = 14;
 static void drawMenuHints(const Palette& p, int mx, int mw, int hy,
                           const char* downLbl = "A", const char* rightLbl = "B") {
   spr.drawFastHLine(mx + 6, hy - 4, mw - 12, p.textDim);
   spr.setTextColor(p.textDim, PANEL);
   // 6px/glyph at size 1; triangle goes 4px after the label ends
+  bool land = uiLandscape();
   int x = mx + 8;
   spr.setCursor(x, hy); spr.print(downLbl);
   x += strlen(downLbl) * 6 + 4;
-  spr.fillTriangle(x, hy + 1, x + 6, hy + 1, x + 3, hy + 6, p.textDim);
+  if (land) spr.fillTriangle(x, hy, x, hy + 6, x + 5, hy + 3, p.textDim);
+  else spr.fillTriangle(x, hy + 1, x + 6, hy + 1, x + 3, hy + 6, p.textDim);
   x = mx + mw / 2 + 4;
   spr.setCursor(x, hy); spr.print(rightLbl);
   x += strlen(rightLbl) * 6 + 4;
-  spr.fillTriangle(x, hy, x, hy + 6, x + 5, hy + 3, p.textDim);
+  if (land) spr.fillTriangle(x + 3, hy, x, hy + 6, x + 6, hy + 6, p.textDim);
+  else spr.fillTriangle(x, hy, x, hy + 6, x + 5, hy + 3, p.textDim);
 }
 
 static void drawSettings() {
   const Palette& p = characterPalette();
-  int mw = 118, mh = 16 + SETTINGS_N * 14 + MENU_HINT_H;
+  const bool land = uiLandscape();
+  const int rowH = 14;
+  const int visibleRows = land ? 7 : SETTINGS_N;
+  int mw = 118;
+  int mh = 16 + visibleRows * rowH + MENU_HINT_H;
+  if (land && mh > H - 12) mh = H - 12;
   int mx = (W - mw) / 2, my = (H - mh) / 2;
   spr.fillRoundRect(mx, my, mw, mh, 4, PANEL);
   spr.drawRoundRect(mx, my, mw, mh, 4, p.textDim);
   spr.setTextSize(1);
   Settings& s = settings();
   bool vals[] = { s.sound, s.bt, s.wifi, s.led, s.hud, s.interactiveQA };
-  for (int i = 0; i < SETTINGS_N; i++) {
+  int start = 0;
+  if (land && SETTINGS_N > visibleRows) {
+    start = settingsSel - visibleRows / 2;
+    if (start < 0) start = 0;
+    int maxStart = SETTINGS_N - visibleRows;
+    if (start > maxStart) start = maxStart;
+  }
+  int end = land ? min<int>(SETTINGS_N, start + visibleRows) : SETTINGS_N;
+  for (int i = start; i < end; i++) {
+    int row = i - start;
     bool sel = (i == settingsSel);
     spr.setTextColor(sel ? p.text : p.textDim, PANEL);
-    spr.setCursor(mx + 6, my + 8 + i * 14);
+    spr.setCursor(mx + 6, my + 8 + row * rowH);
     spr.print(sel ? "> " : "  ");
     spr.print(settingsItems[i]);
-    spr.setCursor(mx + mw - 36, my + 8 + i * 14);
+    spr.setCursor(mx + mw - 36, my + 8 + row * rowH);
     spr.setTextColor(p.textDim, PANEL);
     if (i == 0) {
       spr.printf("%u/4", brightLevel);
@@ -410,13 +492,20 @@ static void drawSettings() {
       spr.setTextColor(vals[i-1] ? GREEN : p.textDim, PANEL);
       spr.print(vals[i-1] ? " on" : "off");
     } else if (i == 7) {
-      static const char* const RN[] = { "auto", "port", "land" };
+      static const char* const RN[] = { "port", "land" };
       spr.print(RN[s.clockRot]);
     } else if (i == 8) {
       uint8_t total = buddySpeciesCount() + (gifAvailable ? 1 : 0);
       uint8_t pos   = buddyMode ? buddySpeciesIdx() + 1 : total;
       spr.printf("%u/%u", pos, total);
     }
+  }
+  if (land && start > 0) {
+    spr.fillTriangle(mx + mw - 10, my + 6, mx + mw - 14, my + 10, mx + mw - 6, my + 10, p.textDim);
+  }
+  if (land && end < SETTINGS_N) {
+    int by = my + mh - MENU_HINT_H - 6;
+    spr.fillTriangle(mx + mw - 10, by + 4, mx + mw - 14, by, mx + mw - 6, by, p.textDim);
   }
   drawMenuHints(p, mx, mw, my + mh - 12, "Next", "Change");
 }
@@ -521,7 +610,6 @@ static uint8_t _orientFromAx(float ax) {
 }
 
 static void clockUpdateOrient() {
-  // IMU-backed clock auto-rotation is disabled. Keep the clock in portrait.
   clockOrient = 0;
   orientFrames = 0;
 }
@@ -570,66 +658,31 @@ static void drawClock() {
   char ss[4]; snprintf(ss, sizeof(ss), ":%02d", sec);
   char dl[12]; snprintf(dl, sizeof(dl), "%s %02d", MON[mi], day);
 
-  if (clockOrient == 0) {
-    paintedOrient = 0;
-    // Portrait clock keeps the GIF at the same full-size home scale, so
-    // reserve the lower 100px for the clock face and leave the upper area
-    // untouched for the character.
-    spr.fillRect(0, 140, W, H - 140, p.bg);
-    spr.setTextDatum(MC_DATUM);
+  int clockTop = uiLandscape() ? 0 : 140;
+  if (uiLandscape()) {
+    int panelX = landscapeSidePanelX();
+    int panelW = landscapeSidePanelW();
+    spr.fillRect(panelX, 0, panelW, H, p.bg);
+  } else {
+    spr.fillRect(0, clockTop, W, H - clockTop, p.bg);
+  }
+  spr.setTextDatum(MC_DATUM);
+  if (uiLandscape()) {
+    int panelX = landscapeSidePanelX();
+    int panelW = landscapeSidePanelW();
+    char wdl[16]; snprintf(wdl, sizeof(wdl), "%s %02d", MON[mi], day);
+    spr.setTextSize(1);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("codex idle", panelX + panelW / 2, 26);
+    spr.setTextSize(3); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, panelX + panelW / 2, 58);
+    spr.setTextSize(1); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, panelX + panelW / 2, 82);
+    spr.setTextColor(p.body, p.bg);                         spr.drawString(wdl, panelX + panelW / 2, 104);
+  } else {
     spr.setTextSize(4); spr.setTextColor(p.text, p.bg);    spr.drawString(hm, CX, 168);
     spr.setTextSize(2); spr.setTextColor(p.textDim, p.bg); spr.drawString(ss, CX, 198);
     spr.setTextSize(1);                                     spr.drawString(dl, CX, 220);
-    spr.setTextDatum(TL_DATUM);
-    return;
   }
-
-  // Landscape: 240×135 direct-to-LCD. Full fill only on entry; after that
-  // text glyph bg cells repaint themselves and the pet box (small, ~90×50)
-  // gets a fillRect each pet tick — small enough not to tear.
-  uint8_t rot = _lcdRotForClock(clockOrient);
-  M5.Lcd.setRotation(rot);
-  static uint8_t lastSec = 0xFF;
-  bool repaint = paintedOrient != rot;
-  if (repaint) { M5.Lcd.fillScreen(p.bg); paintedOrient = rot; lastSec = 0xFF; }
-
-  // Seconds tick at 1Hz; redrawing 3 strings at 60fps is 180 SPI ops/sec
-  // for nothing. Gate on the second changing (or full repaint).
-  if (repaint || sec != lastSec) {
-    lastSec = (uint8_t)sec;
-    char wdl[16]; snprintf(wdl, sizeof(wdl), "%s %s %02d", DOW[wd], MON[mi], day);
-    char ssl[3]; snprintf(ssl, sizeof(ssl), "%02d", sec);
-    M5.Lcd.setTextDatum(MC_DATUM);
-    M5.Lcd.setTextSize(3); M5.Lcd.setTextColor(p.text, p.bg);    M5.Lcd.drawString(hm, 170, 42);
-    M5.Lcd.setTextSize(2); M5.Lcd.setTextColor(p.textDim, p.bg); M5.Lcd.drawString(ssl, 170, 72);
-                                                                  M5.Lcd.drawString(wdl, 170, 102);
-    M5.Lcd.setTextDatum(TL_DATUM);
-    M5.Lcd.setTextSize(1);
-  }
-
-  // Pet on left at 5 fps. Clear includes the overlay-particle zone above
-  // the body (y<30) — species draw Zzz/hearts there via BUDDY_Y_OVERLAY=6
-  // which doesn't go through _yb, so the box has to cover it.
-  static uint32_t lastPetTick = 0;
-  if (millis() - lastPetTick >= 200) {
-    lastPetTick = millis();
-    if (buddyMode) {
-      // ASCII glyphs don't self-clear; wipe the box each tick. Species
-      // hardcode BUDDY_X_CENTER=67 / BUDDY_Y_OVERLAY=6 for particles so
-      // keep portrait coords and just swap the surface — pet lands
-      // upper-left of landscape, which is where we want it anyway.
-      M5.Lcd.fillRect(0, 0, 115, 90, p.bg);
-      buddyRenderTo(&M5.Lcd, activeState);
-    } else {
-      // Full-frame GIFs paint every pixel (transparent → pal.bg), so a
-      // per-tick clear just adds a visible black flash between wipe and
-      // last scanline. The entry fillScreen on paintedOrient change
-      // already covers the surround.
-      characterSetState(activeState);
-      characterRenderTo(&M5.Lcd, 57, 45);
-    }
-  }
-  M5.Lcd.setRotation(0);
+  spr.setTextDatum(TL_DATUM);
 }
 
 PersonaState derive(const TamaState& s) {
@@ -656,14 +709,15 @@ bool checkShake() {
 // then a per-page section label below it. The fixed title is the cue that
 // B cycles pages here just like it does on PET.
 static void _infoHeader(const Palette& p, int& y, const char* section, uint8_t page) {
+  int left = uiLandscape() ? 8 : 4;
   spr.setTextColor(p.text, p.bg);
-  spr.setCursor(4, y); spr.print("Info");
+  spr.setCursor(left, y); spr.print("Info");
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(W - 28, y); spr.printf("%u/%u", page + 1, INFO_PAGES);
-  y += 12;
+  spr.setCursor(W - (uiLandscape() ? 32 : 28), y); spr.printf("%u/%u", page + 1, INFO_PAGES);
+  y += uiLandscape() ? 10 : 12;
   spr.setTextColor(p.body, p.bg);
-  spr.setCursor(4, y); spr.print(section);
-  y += 12;
+  spr.setCursor(left, y); spr.print(section);
+  y += uiLandscape() ? 10 : 12;
 }
 
 void drawPasskey() {
@@ -682,116 +736,203 @@ void drawPasskey() {
 
 void drawInfo() {
   const Palette& p = characterPalette();
-  const int TOP = 70;
-  spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  const int TOP = contentTop();
+  bool showGif = uiLandscape() ? (infoPage == 0) : true;
+  if (uiLandscape() && showGif) {
+    clearLandscapePhotoSurround(p, TOP, H);
+  } else {
+    spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  }
   spr.setTextSize(1);
   int y = TOP + 2;
   auto ln = [&](const char* fmt, ...) {
     char b[32]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof(b), fmt, a); va_end(a);
-    spr.setCursor(4, y); spr.print(b); y += 8;
+    spr.setCursor(uiLandscape() ? 8 : 4, y); spr.print(b); y += uiLandscape() ? 7 : 8;
   };
 
   if (infoPage == 0) {
     _infoHeader(p, y, "CODEX", infoPage);
     uint32_t age = (millis() - tama.lastUpdated) / 1000;
-    const int LEFT_X = 17;
-    const int RUN_CENTER_X = 38;
-    const int WAIT_CENTER_X = 96;
-    const int WAIT_LABEL_X = WAIT_CENTER_X - 21;
+    if (uiLandscape()) {
+      const int leftX = 150;
+      const int rightX = 208;
+      const int runX = 150;
+      const int waitX = 208;
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString("RUNNING", runX, y);
+      spr.drawString("WAITING", waitX, y);
+      spr.setTextDatum(TL_DATUM);
+      y += 10;
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextSize(3);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(String(tama.sessionsRunning), runX, y);
+      spr.drawString(String(tama.sessionsWaiting), waitX, y);
+      spr.setTextDatum(TL_DATUM);
+      spr.setTextSize(1);
+      y += 28;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("RUNNING");
-    spr.setCursor(WAIT_LABEL_X, y);
-    spr.print("WAITING");
-    y += 10;
+      auto kv = [&](int cx, int yy, const char* key, const char* val) {
+        spr.setTextColor(p.textDim, p.bg);
+        spr.setTextDatum(TC_DATUM);
+        spr.drawString(key, cx, yy);
+        spr.setTextColor(p.text, p.bg);
+        spr.drawString(val, cx, yy + 8);
+        spr.setTextDatum(TL_DATUM);
+      };
 
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextSize(3);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(String(tama.sessionsRunning), RUN_CENTER_X, y);
-    spr.drawString(String(tama.sessionsWaiting), WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
-    spr.setTextSize(1);
-    y += 30;
+      char ageBuf[12];
+      snprintf(ageBuf, sizeof(ageBuf), "%lus", (unsigned long)age);
+      y += 6;
+      kv(leftX, y, "SESSIONS", String(tama.sessionsTotal).c_str());
+      kv(rightX, y, "LINK", dataScenarioName());
+      y += 20;
+      kv(leftX, y, "LAST MSG", ageBuf);
+      kv(rightX, y, "STATE", stateNames[activeState]);
+      y += 21;
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString("BLE", (leftX + rightX) / 2 - 28, y);
+      spr.setTextColor(p.text, p.bg);
+      spr.drawString(!bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN", (leftX + rightX) / 2 + 24, y);
+      spr.setTextDatum(TL_DATUM);
+    } else {
+      const int LEFT_X = 17;
+      const int RUN_CENTER_X = 38;
+      const int WAIT_CENTER_X = 96;
+      const int WAIT_LABEL_X = WAIT_CENTER_X - 21;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("SESSIONS");
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(String(tama.sessionsTotal), WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
-    y += 16;
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("RUNNING");
+      spr.setCursor(WAIT_LABEL_X, y);
+      spr.print("WAITING");
+      y += 10;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("LINK");
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(dataScenarioName(), WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
-    y += 14;
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextSize(3);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(String(tama.sessionsRunning), RUN_CENTER_X, y);
+      spr.drawString(String(tama.sessionsWaiting), WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+      spr.setTextSize(1);
+      y += 30;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("BLE");
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(!bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN", WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
-    y += 14;
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("SESSIONS");
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(String(tama.sessionsTotal), WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+      y += 16;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("LAST MSG");
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(String((unsigned long)age) + "s", WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
-    y += 14;
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("LINK");
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(dataScenarioName(), WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+      y += 14;
 
-    spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(LEFT_X, y);
-    spr.print("STATE");
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextDatum(TC_DATUM);
-    spr.drawString(stateNames[activeState], WAIT_CENTER_X, y);
-    spr.setTextDatum(TL_DATUM);
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("BLE");
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(!bleConnected() ? "-" : bleSecure() ? "encrypted" : "OPEN", WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+      y += 14;
+
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("LAST MSG");
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(String((unsigned long)age) + "s", WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+      y += 14;
+
+      spr.setTextColor(p.textDim, p.bg);
+      spr.setCursor(LEFT_X, y);
+      spr.print("STATE");
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextDatum(TC_DATUM);
+      spr.drawString(stateNames[activeState], WAIT_CENTER_X, y);
+      spr.setTextDatum(TL_DATUM);
+    }
 
   } else if (infoPage == 1) {
     _infoHeader(p, y, "ABOUT", infoPage);
     spr.setTextColor(p.textDim, p.bg);
-    ln("I watch your Codex");
-    ln("desktop sessions.");
-    y += 6;
-    ln("I sleep when nothing's");
-    ln("happening, wake when");
-    ln("you start working,");
-    ln("get impatient when");
-    ln("approvals pile up.");
-    y += 6;
-    spr.setTextColor(p.text, p.bg);
-    ln("Press A on a prompt");
-    ln("to approve from here.");
-    y += 6;
-    spr.setTextColor(p.textDim, p.bg);
-    ln("18 species. Settings");
-    ln("> ascii pet to cycle.");
+    if (uiLandscape()) {
+      int textX = 8;
+      int textW = W - textX - 8;
+      y = TOP + 18;
+      const int lh = 12;
+      y += drawBodyWrappedParagraph("I watch your Codex desktop sessions.", textX, y, 4, textW, lh, p.textDim) * lh + 3;
+      y += drawBodyWrappedParagraph("I sleep when nothing's happening, wake when you start working, get impatient when approvals pile up.", textX, y, 5, textW, lh, p.textDim) * lh + 3;
+      spr.setTextColor(p.text, p.bg);
+      y += drawBodyWrappedParagraph("Press A on a prompt to approve from here.", textX, y, 4, textW, lh, p.text) * lh + 3;
+      spr.setTextColor(p.textDim, p.bg);
+      drawBodyWrappedParagraph("18 species. Settings > ascii pet to cycle.", textX, y, 3, textW, lh, p.textDim);
+    } else {
+      ln("I watch your Codex");
+      ln("desktop sessions.");
+      y += 6;
+      ln("I sleep when nothing's");
+      ln("happening, wake when");
+      ln("you start working,");
+      ln("get impatient when");
+      ln("approvals pile up.");
+      y += 6;
+      spr.setTextColor(p.text, p.bg);
+      ln("Press A on a prompt");
+      ln("to approve from here.");
+      y += 6;
+      spr.setTextColor(p.textDim, p.bg);
+      ln("18 species. Settings");
+      ln("> ascii pet to cycle.");
+    }
 
   } else if (infoPage == 2) {
     _infoHeader(p, y, "BUTTONS", infoPage);
-    spr.setTextColor(p.text, p.bg);    ln("A   front");
-    spr.setTextColor(p.textDim, p.bg); ln("    next screen");
-    ln("    approve prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("B   right side");
-    spr.setTextColor(p.textDim, p.bg); ln("    next page");
-    ln("    deny prompt"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("hold A");
-    spr.setTextColor(p.textDim, p.bg); ln("    menu"); y += 4;
-    spr.setTextColor(p.text, p.bg);    ln("Power  left side");
-    spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
-    ln("    hold 6s = off");
+    if (uiLandscape()) {
+      int textX = 8;
+      int textW = W - textX - 8;
+      y = TOP + 18;
+      const int lh = 12;
+      spr.setTextColor(p.text, p.bg);
+      y += drawBodyWrappedParagraph("A   front", textX, y, 1, textW, lh, p.text) * lh;
+      spr.setTextColor(p.textDim, p.bg);
+      y += drawBodyWrappedParagraph("next screen   approve prompt", textX + 8, y, 3, textW - 8, lh, p.textDim) * lh + 3;
+      spr.setTextColor(p.text, p.bg);
+      y += drawBodyWrappedParagraph("B   right side", textX, y, 1, textW, lh, p.text) * lh;
+      spr.setTextColor(p.textDim, p.bg);
+      y += drawBodyWrappedParagraph("next page   deny prompt", textX + 8, y, 3, textW - 8, lh, p.textDim) * lh + 3;
+      spr.setTextColor(p.text, p.bg);
+      y += drawBodyWrappedParagraph("hold A", textX, y, 1, textW, lh, p.text) * lh;
+      spr.setTextColor(p.textDim, p.bg);
+      y += drawBodyWrappedParagraph("menu", textX + 8, y, 2, textW - 8, lh, p.textDim) * lh + 3;
+      spr.setTextColor(p.text, p.bg);
+      y += drawBodyWrappedParagraph("Power  left side", textX, y, 1, textW, lh, p.text) * lh;
+      spr.setTextColor(p.textDim, p.bg);
+      drawBodyWrappedParagraph("tap = screen off   hold 6s = off", textX + 8, y, 3, textW - 8, lh, p.textDim);
+    } else {
+      spr.setTextColor(p.text, p.bg);    ln("A   front");
+      spr.setTextColor(p.textDim, p.bg); ln("    next screen");
+      ln("    approve prompt"); y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("B   right side");
+      spr.setTextColor(p.textDim, p.bg); ln("    next page");
+      ln("    deny prompt"); y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("hold A");
+      spr.setTextColor(p.textDim, p.bg); ln("    menu"); y += 4;
+      spr.setTextColor(p.text, p.bg);    ln("Power  left side");
+      spr.setTextColor(p.textDim, p.bg); ln("    tap = screen off");
+      ln("    hold 6s = off");
+    }
 
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
@@ -805,32 +946,72 @@ void drawInfo() {
     bool charging = usb && iBat_mA > 1;
     bool full = usb && vBat_mV > 4100 && iBat_mA < 10;
 
-    spr.setTextColor(p.text, p.bg);
-    spr.setTextSize(2);
-    spr.setCursor(4, y);
-    spr.printf("%d%%", pct);
-    spr.setTextSize(1);
-    spr.setTextColor(full ? GREEN : (charging ? HOT : p.textDim), p.bg);
-    spr.setCursor(60, y + 4);
-    spr.print(full ? "full" : (charging ? "charging" : (usb ? "usb" : "battery")));
-    y += 20;
+    if (uiLandscape()) {
+      const int leftX = 10;
+      const int rightX = 126;
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextSize(2);
+      spr.setCursor(leftX, y);
+      spr.printf("%d%%", pct);
+      spr.setTextSize(1);
+      spr.setTextColor(full ? GREEN : (charging ? HOT : p.textDim), p.bg);
+      spr.setCursor(leftX + 48, y + 4);
+      spr.print(full ? "full" : (charging ? "charging" : (usb ? "usb" : "battery")));
 
-    spr.setTextColor(p.textDim, p.bg);
-    ln("  battery  %d.%02dV", vBat_mV/1000, (vBat_mV%1000)/10);
-    ln("  current  %+dmA", iBat_mA);
-    if (usb) ln("  usb in   %d.%02dV", vBus_mV/1000, (vBus_mV%1000)/10);
-    y += 8;
+      auto kv = [&](int xx, int yy, const char* key, const char* val) {
+        spr.setTextColor(p.textDim, p.bg);
+        spr.drawString(key, xx, yy);
+        spr.setTextColor(p.text, p.bg);
+        spr.drawString(val, xx, yy + 9);
+      };
+      char batBuf[16], curBuf[16], usbBuf[16], upBuf[16], heapBuf[16], tempBuf[16];
+      snprintf(batBuf, sizeof(batBuf), "%d.%02dV", vBat_mV/1000, (vBat_mV%1000)/10);
+      snprintf(curBuf, sizeof(curBuf), "%+dmA", iBat_mA);
+      snprintf(usbBuf, sizeof(usbBuf), "%d.%02dV", vBus_mV/1000, (vBus_mV%1000)/10);
+      uint32_t up = millis() / 1000;
+      snprintf(upBuf, sizeof(upBuf), "%luh %02lum", up / 3600, (up / 60) % 60);
+      snprintf(heapBuf, sizeof(heapBuf), "%uKB", ESP.getFreeHeap() / 1024);
+      snprintf(tempBuf, sizeof(tempBuf), "%dC", compat::chipTempC());
+      int col1 = 10, col2 = 86, col3 = 162;
+      y += 18;
+      kv(col1, y, "BATTERY", batBuf);
+      kv(col2, y, "CURRENT", curBuf);
+      kv(col3, y, usb ? "USB IN" : "UPTIME", usb ? usbBuf : upBuf);
+      y += 22;
+      kv(col1, y, usb ? "UPTIME" : "HEAP", usb ? upBuf : heapBuf);
+      kv(col2, y, "OWNER", ownerName()[0] ? ownerName() : "-");
+      kv(col3, y, "BRIGHT", String(brightLevel).c_str());
+      y += 22;
+      kv(col1, y, "BT", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
+      kv(col2, y, "TEMP", tempBuf);
+    } else {
+      spr.setTextColor(p.text, p.bg);
+      spr.setTextSize(2);
+      spr.setCursor(4, y);
+      spr.printf("%d%%", pct);
+      spr.setTextSize(1);
+      spr.setTextColor(full ? GREEN : (charging ? HOT : p.textDim), p.bg);
+      spr.setCursor(60, y + 4);
+      spr.print(full ? "full" : (charging ? "charging" : (usb ? "usb" : "battery")));
+      y += 20;
 
-    spr.setTextColor(p.text, p.bg);
-    ln("SYSTEM");
-    spr.setTextColor(p.textDim, p.bg);
-    if (ownerName()[0]) ln("  owner    %s", ownerName());
-    uint32_t up = millis() / 1000;
-    ln("  uptime   %luh %02lum", up / 3600, (up / 60) % 60);
-    ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
-    ln("  bright   %u/4", brightLevel);
-    ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
-    ln("  temp     %dC", compat::chipTempC());
+      spr.setTextColor(p.textDim, p.bg);
+      ln("  battery  %d.%02dV", vBat_mV/1000, (vBat_mV%1000)/10);
+      ln("  current  %+dmA", iBat_mA);
+      if (usb) ln("  usb in   %d.%02dV", vBus_mV/1000, (vBus_mV%1000)/10);
+      y += 8;
+
+      spr.setTextColor(p.text, p.bg);
+      ln("SYSTEM");
+      spr.setTextColor(p.textDim, p.bg);
+      if (ownerName()[0]) ln("  owner    %s", ownerName());
+      uint32_t up = millis() / 1000;
+      ln("  uptime   %luh %02lum", up / 3600, (up / 60) % 60);
+      ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
+      ln("  bright   %u/4", brightLevel);
+      ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
+      ln("  temp     %dC", compat::chipTempC());
+    }
 
   } else if (infoPage == 4) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
@@ -885,12 +1066,19 @@ void drawInfo() {
     ln("source");
     y += 4;
     spr.setTextColor(p.text, p.bg);
-    ln("cd /home/arnold/Projects");
-    ln("/codex-buddy/claude-des");
-    ln("ktop-buddy-s3");
-    ln("./.venv/bin/python3 -m");
-    ln(" platformio run -t");
-    ln(" upload");
+    if (uiLandscape()) {
+      ln("cd /home/arnold/Projects/codex-buddy");
+      ln("claude-desktop-buddy-s3");
+      ln("./.venv/bin/python3 -m");
+      ln("platformio run -t upload");
+    } else {
+      ln("cd /home/arnold/Projects");
+      ln("/codex-buddy/claude-des");
+      ln("ktop-buddy-s3");
+      ln("./.venv/bin/python3 -m");
+      ln(" platformio run -t");
+      ln(" upload");
+    }
     y += 12;
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
@@ -980,47 +1168,99 @@ static uint8_t wrapIntoCenteredWords(const char* in, char out[][24], uint8_t max
   return out[row][0] ? row + 1 : row;
 }
 
+static uint8_t wrapIntoBodyWords(const char* in, char out[][96], uint8_t maxRows, int maxPx) {
+  if (!in || !*in || maxRows == 0) return 0;
+
+  uint8_t row = 0;
+  out[row][0] = 0;
+  const char* p = in;
+
+  while (*p && row < maxRows) {
+    while (*p == ' ') p++;
+    if (!*p) break;
+
+    const char* w = p;
+    while (*p && *p != ' ') p++;
+    size_t wlen = (size_t)(p - w);
+    if (wlen == 0) break;
+    if (wlen > 95) wlen = 95;
+
+    char word[96];
+    memcpy(word, w, wlen);
+    word[wlen] = 0;
+
+    char candidate[96];
+    if (out[row][0]) snprintf(candidate, sizeof(candidate), "%s %s", out[row], word);
+    else snprintf(candidate, sizeof(candidate), "%s", word);
+
+    if (spr.textWidth(candidate) <= maxPx) {
+      snprintf(out[row], sizeof(out[row]), "%s", candidate);
+      continue;
+    }
+
+    if (out[row][0] == 0) {
+      snprintf(out[row], sizeof(out[row]), "%s", word);
+    }
+
+    if (++row >= maxRows) return row;
+    out[row][0] = 0;
+    snprintf(out[row], sizeof(out[row]), "%s", word);
+  }
+
+  return out[row][0] ? row + 1 : row;
+}
+
 static void drawApproval() {
   const Palette& p = characterPalette();
-  const int AREA = 78;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.drawFastHLine(0, H - AREA, W, p.textDim);
+  const bool land = uiLandscape();
+  const int AREA = land ? (H - 12) : 78;
+  const int x = land ? landscapeSidePanelX() : 0;
+  const int y = land ? 6 : (H - AREA);
+  const int w = land ? landscapeSidePanelW() : W;
+  spr.fillRect(x, y, w, AREA, p.bg);
+  if (land) spr.drawRoundRect(x, y, w, AREA, 4, p.textDim);
+  else spr.drawFastHLine(0, y, W, p.textDim);
 
   spr.setTextSize(1);
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(4, H - AREA + 4);
+  spr.setCursor(x + 4, y + 4);
   uint32_t waited = (millis() - promptArrivedMs) / 1000;
   if (waited >= 10) spr.setTextColor(HOT, p.bg);
   spr.printf("approve? %lus", (unsigned long)waited);
 
-  // Size 2 only if it fits one line (~10 chars at 12px on 135px screen)
   int toolLen = strlen(tama.promptTool);
   spr.setTextColor(p.text, p.bg);
-  spr.setTextSize(toolLen <= 10 ? 2 : 1);
-  spr.setCursor(4, H - AREA + (toolLen <= 10 ? 14 : 18));
-  spr.print(tama.promptTool);
-  spr.setTextSize(1);
+  if (land) {
+    spr.setTextSize(1);
+    drawCenteredWrappedBlock(tama.promptTool, y + 24, 2, p.text, w - 12, 12);
+    spr.setTextColor(p.textDim, p.bg);
+    drawCenteredWrappedBlock(tama.promptHint, y + 50, 3, p.textDim, w - 12, 11);
+  } else {
+    spr.setTextSize(toolLen <= 10 ? 2 : 1);
+    spr.setCursor(4, y + (toolLen <= 10 ? 14 : 18));
+    spr.print(tama.promptTool);
+    spr.setTextSize(1);
 
-  // Hint wraps at ~21 chars to two lines under the tool name
-  spr.setTextColor(p.textDim, p.bg);
-  int hlen = strlen(tama.promptHint);
-  spr.setCursor(4, H - AREA + 34);
-  spr.printf("%.21s", tama.promptHint);
-  if (hlen > 21) {
-    spr.setCursor(4, H - AREA + 42);
-    spr.printf("%.21s", tama.promptHint + 21);
+    spr.setTextColor(p.textDim, p.bg);
+    int hlen = strlen(tama.promptHint);
+    spr.setCursor(4, y + 34);
+    spr.printf("%.21s", tama.promptHint);
+    if (hlen > 21) {
+      spr.setCursor(4, y + 42);
+      spr.printf("%.21s", tama.promptHint + 21);
+    }
   }
 
   if (responseSent) {
     spr.setTextColor(p.textDim, p.bg);
-    spr.setCursor(4, H - 12);
+    spr.setCursor(x + 4, y + AREA - 12);
     spr.print("sent...");
   } else {
     spr.setTextColor(GREEN, p.bg);
-    spr.setCursor(4, H - 12);
+    spr.setCursor(x + 4, y + AREA - 12);
     spr.print("A: approve");
     spr.setTextColor(HOT, p.bg);
-    spr.setCursor(W - 48, H - 12);
+    spr.setCursor(x + w - 48, y + AREA - 12);
     spr.print("B: deny");
   }
 }
@@ -1102,7 +1342,7 @@ static uint8_t wrapIntoCenteredUtf8(const char* in, char out[][96], uint8_t maxR
   return out[row][0] ? row + 1 : row;
 }
 
-static uint8_t drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color, int maxPx = 124, int lineHeight = 14) {
+static uint8_t drawCenteredWrappedBlock(const char* text, int topY, int maxRows, uint16_t color, int maxPx, int lineHeight) {
   char lines[12][96] = {{0}};
   uint8_t rows = 0;
   spr.setFont(interactiveTextFont(text));
@@ -1120,31 +1360,81 @@ static uint8_t drawCenteredWrappedBlock(const char* text, int topY, int maxRows,
   return rows;
 }
 
+static uint8_t drawLandscapeWrappedStatus(const char* text, char lines[][24], uint8_t maxRows, int maxPx) {
+  spr.setFont(&fonts::Font0);
+  spr.setTextSize(2);
+  return wrapIntoCenteredWords(text ? text : "", lines, maxRows, maxPx);
+}
+
+static int paragraphLineHeight(const char* text, int baseLineHeight) {
+  if (containsNonAscii(text)) return baseLineHeight < 18 ? 18 : baseLineHeight;
+  return baseLineHeight < 12 ? 12 : baseLineHeight;
+}
+
+static uint8_t drawBodyWrappedParagraph(const char* text, int x, int y, int maxRows, int maxPx, int lineHeight, uint16_t color) {
+  char lines[12][96] = {{0}};
+  spr.setFont(&fonts::Font0);
+  spr.setTextSize(1);
+  uint8_t rows = wrapIntoBodyWords(text ? text : "", lines, maxRows, maxPx);
+  spr.setTextColor(color, characterPalette().bg);
+  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], x, y + i * lineHeight);
+  restoreDefaultUiFont();
+  return rows;
+}
+
+static uint8_t drawWrappedParagraph(const char* text, int x, int y, int maxRows, int maxPx, int lineHeight, uint16_t color) {
+  char lines[12][96] = {{0}};
+  uint8_t rows = 0;
+  spr.setFont(interactiveTextFont(text));
+  spr.setTextSize(1);
+  if (containsNonAscii(text)) {
+    rows = wrapIntoCenteredUtf8(text ? text : "", lines, maxRows, maxPx);
+  } else {
+    char asciiLines[12][24] = {{0}};
+    rows = wrapIntoCenteredWords(text ? text : "", asciiLines, maxRows, maxPx);
+    for (uint8_t i = 0; i < rows; i++) snprintf(lines[i], sizeof(lines[i]), "%s", asciiLines[i]);
+  }
+  spr.setTextColor(color, characterPalette().bg);
+  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], x, y + i * lineHeight);
+  restoreDefaultUiFont();
+  return rows;
+}
+
+static void drawLandscapeWrappedStatusBlock(const char* text, int centerX, int topY, uint16_t color) {
+  char lines[6][24] = {{0}};
+  uint8_t rows = drawLandscapeWrappedStatus(text, lines, 6, landscapeSidePanelW() - 14);
+  spr.setTextColor(color, characterPalette().bg);
+  for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], centerX, topY + i * 18);
+  spr.setTextSize(1);
+}
+
 static void drawInteractive() {
   const Palette& p = characterPalette();
-  uint8_t totalPages = interactivePageCount();
-  if (interactivePage >= totalPages) interactivePage = 0;
-
-  const int AREA = 94;
-  spr.fillRect(0, H - AREA, W, AREA, p.bg);
-  spr.drawFastHLine(0, H - AREA, W, p.textDim);
+  const bool land = uiLandscape();
+  const int AREA = land ? (H - 12) : 94;
+  const int x = land ? landscapeSidePanelX() : 0;
+  const int y = land ? 6 : (H - AREA);
+  const int w = land ? landscapeSidePanelW() : W;
+  spr.fillRect(x, y, w, AREA, p.bg);
+  if (land) spr.drawRoundRect(x, y, w, AREA, 4, p.textDim);
+  else spr.drawFastHLine(0, y, W, p.textDim);
 
   spr.setTextDatum(TL_DATUM);
   spr.setTextSize(1);
   spr.setTextColor(p.textDim, p.bg);
-  spr.setCursor(4, H - AREA + 4);
+  spr.setCursor(x + 4, y + 4);
   spr.print("input needed");
 
   spr.setTextDatum(MC_DATUM);
   spr.setTextSize(2);
   spr.setTextColor(p.text, p.bg);
-  spr.drawString("extra input", W / 2, H - AREA + 24);
+  spr.drawString("extra input", x + w / 2, y + 24);
 
   spr.setTextSize(1);
   spr.setTextColor(p.body, p.bg);
-  spr.drawString("Continue on desktop", W / 2, H - AREA + 46);
+  spr.drawString("Continue on desktop", x + w / 2, y + 46);
   spr.setTextColor(p.textDim, p.bg);
-  spr.drawString("codex is waiting for you", W / 2, H - 20);
+  spr.drawString("codex is waiting for you", x + w / 2, y + AREA - 18);
   spr.setTextDatum(TL_DATUM);
 }
 
@@ -1207,90 +1497,163 @@ static void formatResetTime(uint32_t resetEpoch, char* out, size_t outLen) {
 }
 
 static void drawPetStats(const Palette& p) {
-  const int TOP = 70;
-  spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  const int TOP = contentTop();
+  bool showGif = uiLandscape() ? (petPage == 0) : true;
+  if (uiLandscape() && showGif) {
+    clearLandscapePhotoSurround(p, TOP, H);
+  } else {
+    spr.fillRect(0, TOP, W, H - TOP, p.bg);
+  }
   spr.setTextDatum(TL_DATUM);
   spr.setTextSize(1);
 
-  const int cardX = 6;
-  const int cardW = W - 12;
-  int y = TOP + 16;
+  if (uiLandscape()) {
+    const int leftX = 8;
+    const int levelX = 8;
+    const int rightX = 130;
+    const int rightW = W - rightX - 8;
+    int y = TOP + 8;
 
-  uint8_t mood = statsMoodTier();
-  uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
-  spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(p.textDim, p.bg);
-  spr.drawString("mood", cardX, y);
-  for (int i = 0; i < 4; i++) tinyHeart(cardX + 40 + i * 15, y + 3, i < mood, moodCol);
+    uint8_t mood = statsMoodTier();
+    uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
+    spr.setTextColor(p.textDim, p.bg);
+    int moodY = 100;
+    spr.drawString("mood", leftX, moodY);
+    for (int i = 0; i < 4; i++) tinyHeart(leftX + 34 + i * 11, moodY + 3, i < mood, moodCol);
 
-  y += 16;
-  uint16_t usageCol5h = (tama.usage5hRemaining < 20) ? HOT : p.body;
-  drawUsageCard(
-    p, cardX, y, cardW, "usage", "5h",
-    tama.usage5hRemaining, usageCol5h
-  );
+    int levelY = 118;
+    spr.fillRoundRect(levelX, levelY - 2, 34, 14, 3, p.body);
+    spr.setTextColor(p.bg, p.body);
+    spr.setTextDatum(MC_DATUM);
+    char levelBuf[12];
+    snprintf(levelBuf, sizeof(levelBuf), "Lv.%u", stats().level);
+    spr.drawString(levelBuf, levelX + 17, levelY + 4);
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextColor(p.textDim, p.bg);
+    uint8_t fed = statsFedProgress();
+    uint8_t fedDots = (uint8_t)((fed * 7 + 9) / 10);
+    for (int i = 0; i < 7; i++) {
+      int px = 48 + i * 7;
+      if (i < fedDots) spr.fillCircle(px, levelY + 4, 2, p.body);
+      else spr.drawCircle(px, levelY + 4, 2, p.textDim);
+    }
 
-  y += 28;
-  uint16_t usageCol1w = (tama.usageWeekRemaining < 20) ? HOT : p.body;
-  drawUsageCard(
-    p, cardX, y, cardW, "usage", "1w",
-    tama.usageWeekRemaining, usageCol1w
-  );
+    y = 32;
+    uint16_t usageCol5h2 = (tama.usage5hRemaining < 20) ? HOT : p.body;
+    drawUsageCard(p, rightX, y - 2, rightW, "usage", "5h", tama.usage5hRemaining, usageCol5h2);
 
-  y += 30;
-  spr.fillRoundRect(6, y - 2, 48, 14, 3, p.body);
-  spr.setTextColor(p.bg, p.body);
-  spr.setTextDatum(MC_DATUM);
-  char levelBuf[12];
-  snprintf(levelBuf, sizeof(levelBuf), "Lv.%u", stats().level);
-  spr.drawString(levelBuf, 30, y + 4);
-  spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(p.textDim, p.bg);
-  uint8_t fed = statsFedProgress();
-  for (int i = 0; i < 10; i++) {
-    int px = 72 + i * 6;
-    if (i < fed) spr.fillCircle(px, y + 4, 2, p.body);
-    else spr.drawCircle(px, y + 4, 2, p.textDim);
+    y += 24;
+    uint16_t usageCol1w = (tama.usageWeekRemaining < 20) ? HOT : p.body;
+    drawUsageCard(p, rightX, y - 2, rightW, "usage", "1w", tama.usageWeekRemaining, usageCol1w);
+
+    const int statsY = 78;
+    const int statsLeft = 136;
+    const int statsRight = rightX + rightW;
+    const int rowGap = 10;
+    char totalBuf[16], todayBuf[16], decisionBuf[16], napBuf[16], weekReset[20];
+    formatCompactValue(stats().tokens, totalBuf, sizeof(totalBuf));
+    formatCompactValue(tama.tokensToday, todayBuf, sizeof(todayBuf));
+    snprintf(decisionBuf, sizeof(decisionBuf), "%u/%u", stats().approvals, stats().denials);
+    uint32_t nap = stats().napSeconds;
+    snprintf(napBuf, sizeof(napBuf), "%luh%02lum", nap / 3600UL, (nap / 60UL) % 60UL);
+    formatResetTime(tama.usageWeekResetAt, weekReset, sizeof(weekReset));
+
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("total", statsLeft, statsY + rowGap * 0);
+    spr.drawString("today", statsLeft, statsY + rowGap * 1);
+    spr.drawString("yes/no", statsLeft, statsY + rowGap * 2);
+    spr.drawString("napped", statsLeft, statsY + rowGap * 3);
+    spr.drawString("refresh", statsLeft, statsY + rowGap * 4);
+    spr.setTextColor(p.text, p.bg);
+    spr.setTextDatum(TR_DATUM);
+    spr.drawString(totalBuf, statsRight, statsY + rowGap * 0);
+    spr.drawString(todayBuf, statsRight, statsY + rowGap * 1);
+    spr.drawString(decisionBuf, statsRight, statsY + rowGap * 2);
+    spr.drawString(napBuf, statsRight, statsY + rowGap * 3);
+    spr.drawString(weekReset, statsRight, statsY + rowGap * 4);
+    spr.setTextDatum(TL_DATUM);
+  } else {
+    const int cardX = 6;
+    const int cardW = W - 12;
+    int y = TOP + 16;
+
+    uint8_t mood = statsMoodTier();
+    uint16_t moodCol = (mood >= 3) ? RED : (mood >= 2) ? HOT : p.textDim;
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("mood", cardX, y);
+    for (int i = 0; i < 4; i++) tinyHeart(cardX + 40 + i * 15, y + 3, i < mood, moodCol);
+
+    y += 16;
+    uint16_t usageCol5h = (tama.usage5hRemaining < 20) ? HOT : p.body;
+    drawUsageCard(
+      p, cardX, y, cardW, "usage", "5h",
+      tama.usage5hRemaining, usageCol5h
+    );
+
+    y += 28;
+    uint16_t usageCol1w = (tama.usageWeekRemaining < 20) ? HOT : p.body;
+    drawUsageCard(
+      p, cardX, y, cardW, "usage", "1w",
+      tama.usageWeekRemaining, usageCol1w
+    );
+
+    y += 30;
+    spr.fillRoundRect(6, y - 2, 48, 14, 3, p.body);
+    spr.setTextColor(p.bg, p.body);
+    spr.setTextDatum(MC_DATUM);
+    char levelBuf[12];
+    snprintf(levelBuf, sizeof(levelBuf), "Lv.%u", stats().level);
+    spr.drawString(levelBuf, 30, y + 4);
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextColor(p.textDim, p.bg);
+    uint8_t fed = statsFedProgress();
+    for (int i = 0; i < 10; i++) {
+      int px = 72 + i * 6;
+      if (i < fed) spr.fillCircle(px, y + 4, 2, p.body);
+      else spr.drawCircle(px, y + 4, 2, p.textDim);
+    }
+
+    y += 20;
+    spr.setTextDatum(TL_DATUM);
+    const int leftX = 18;
+    const int rightX = 76;
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("total", leftX, y);
+    spr.drawString("today", rightX, y);
+    spr.drawString("yes/no", leftX, y + 22);
+    spr.drawString("napped", rightX, y + 22);
+
+    char totalBuf[16];
+    char todayBuf[16];
+    formatCompactValue(stats().tokens, totalBuf, sizeof(totalBuf));
+    formatCompactValue(tama.tokensToday, todayBuf, sizeof(todayBuf));
+    spr.setTextColor(p.text, p.bg);
+    spr.drawString(totalBuf, leftX, y + 10);
+    spr.drawString(todayBuf, rightX, y + 10);
+    char decisionBuf[16];
+    snprintf(decisionBuf, sizeof(decisionBuf), "%u/%u", stats().approvals, stats().denials);
+    spr.drawString(decisionBuf, leftX, y + 32);
+    uint32_t nap = stats().napSeconds;
+    char napBuf[16];
+    snprintf(napBuf, sizeof(napBuf), "%luh%02lum", nap / 3600UL, (nap / 60UL) % 60UL);
+    spr.drawString(napBuf, rightX, y + 32);
+
+    y += 44;
+    char weekReset[20];
+    formatResetTime(tama.usageWeekResetAt, weekReset, sizeof(weekReset));
+    spr.setTextColor(p.textDim, p.bg);
+    spr.drawString("refresh", leftX, y);
+    spr.setTextDatum(TL_DATUM);
+    spr.setTextColor(p.text, p.bg);
+    spr.drawString(weekReset, 64, y);
+    spr.setTextDatum(TL_DATUM);
   }
-
-  y += 20;
-  spr.setTextDatum(TL_DATUM);
-  const int leftX = 18;
-  const int rightX = 76;
-  spr.setTextColor(p.textDim, p.bg);
-  spr.drawString("total", leftX, y);
-  spr.drawString("today", rightX, y);
-  spr.drawString("yes/no", leftX, y + 22);
-  spr.drawString("napped", rightX, y + 22);
-
-  char totalBuf[16];
-  char todayBuf[16];
-  formatCompactValue(stats().tokens, totalBuf, sizeof(totalBuf));
-  formatCompactValue(tama.tokensToday, todayBuf, sizeof(todayBuf));
-  spr.setTextColor(p.text, p.bg);
-  spr.drawString(totalBuf, leftX, y + 10);
-  spr.drawString(todayBuf, rightX, y + 10);
-  char decisionBuf[16];
-  snprintf(decisionBuf, sizeof(decisionBuf), "%u/%u", stats().approvals, stats().denials);
-  spr.drawString(decisionBuf, leftX, y + 32);
-  uint32_t nap = stats().napSeconds;
-  char napBuf[16];
-  snprintf(napBuf, sizeof(napBuf), "%luh%02lum", nap / 3600UL, (nap / 60UL) % 60UL);
-  spr.drawString(napBuf, rightX, y + 32);
-
-  y += 44;
-  char weekReset[20];
-  formatResetTime(tama.usageWeekResetAt, weekReset, sizeof(weekReset));
-  spr.setTextColor(p.textDim, p.bg);
-  spr.drawString("refresh", leftX, y);
-  spr.setTextDatum(TL_DATUM);
-  spr.setTextColor(p.text, p.bg);
-  spr.drawString(weekReset, 64, y);
-  spr.setTextDatum(TL_DATUM);
 }
 
 static void drawPetHowTo(const Palette& p) {
-  const int TOP = 70;
+  const int TOP = contentTop();
   spr.fillRect(0, TOP, W, H - TOP, p.bg);
   spr.setTextSize(1);
   int y = TOP + 2;
@@ -1299,30 +1662,47 @@ static void drawPetHowTo(const Palette& p) {
   };
   auto gap = [&]() { y += 4; };
 
-  y += 12;  // room for the PET header drawn by drawPet()
+  y += uiLandscape() ? 8 : 12;  // room for the PET header drawn by drawPet()
+  if (uiLandscape()) {
+    int textX = 8;
+    int textW = W - textX - 8;
+    y = TOP + 18;
+    const int lh = 12;
+    y += drawBodyWrappedParagraph("MOOD", textX, y, 1, textW, lh, p.body) * lh;
+    y += drawBodyWrappedParagraph("approve fast = up   deny lots = down", textX + 8, y, 3, textW - 8, lh, p.textDim) * lh + 4;
 
-  ln(p.body,    "MOOD");
-  ln(p.textDim, " approve fast = up");
-  ln(p.textDim, " deny lots = down"); gap();
+    y += drawBodyWrappedParagraph("USAGE", textX, y, 1, textW, lh, p.body) * lh;
+    y += drawBodyWrappedParagraph("5h = codex left   week = quota left", textX + 8, y, 3, textW - 8, lh, p.textDim) * lh + 4;
 
-  ln(p.body,    "USAGE");
-  ln(p.textDim, " 5h = codex left");
-  ln(p.textDim, " week = quota left"); gap();
+    y += drawBodyWrappedParagraph("LEVEL", textX, y, 1, textW, lh, p.body) * lh;
+    y += drawBodyWrappedParagraph("50K tokens = level up + confetti", textX + 8, y, 3, textW - 8, lh, p.textDim) * lh + 4;
 
-  ln(p.body,    "LEVEL");
-  ln(p.textDim, " 50K tokens =");
-  ln(p.textDim, " level up + confetti"); gap();
+    y += drawBodyWrappedParagraph("idle 30s = off   any button = wake", textX, y, 3, textW, lh, p.textDim) * lh + 4;
+    drawBodyWrappedParagraph("A: screens   B: page   hold A: menu", textX, y, 3, textW, lh, p.textDim);
+  } else {
+    ln(p.body,    "MOOD");
+    ln(p.textDim, " approve fast = up");
+    ln(p.textDim, " deny lots = down"); gap();
 
-  ln(p.textDim, "idle 30s = off");
-  ln(p.textDim, "any button = wake"); gap();
+    ln(p.body,    "USAGE");
+    ln(p.textDim, " 5h = codex left");
+    ln(p.textDim, " week = quota left"); gap();
 
-  ln(p.textDim, "A: screens  B: page");
-  ln(p.textDim, "hold A: menu");
+    ln(p.body,    "LEVEL");
+    ln(p.textDim, " 50K tokens =");
+    ln(p.textDim, " level up + confetti"); gap();
+
+    ln(p.textDim, "idle 30s = off");
+    ln(p.textDim, "any button = wake"); gap();
+
+    ln(p.textDim, "A: screens  B: page");
+    ln(p.textDim, "hold A: menu");
+  }
 }
 
 void drawPet() {
   const Palette& p = characterPalette();
-  int y = 70;
+  int y = contentTop();
 
   if (petPage == 0) drawPetStats(p);
   else drawPetHowTo(p);
@@ -1350,26 +1730,41 @@ void drawHUD() {
   if (interactiveActive()) { drawInteractive(); return; }
   const Palette& p = characterPalette();
   const int SHOW = 2, LH = 16, MAX_PX = 118;
-  const int AREA = SHOW * LH + 10;
-  const int TOP = 170;
-  spr.fillRect(0, TOP, W, AREA, p.bg);
-  spr.setTextSize(2);
+  const bool land = uiLandscape();
+  const int AREA = land ? (H - 12) : (SHOW * LH + 10);
+  const int TOP = land ? 6 : 170;
+  const int X = land ? landscapeSidePanelX() : 0;
+  const int panelW = land ? landscapeSidePanelW() : W;
+  spr.fillRect(X, TOP, panelW, AREA, p.bg);
+  spr.setTextSize(land ? 1 : 2);
   spr.setTextDatum(MC_DATUM);
 
   if (tama.lineGen != lastLineGen) { msgScroll = 0; lastLineGen = tama.lineGen; wake(); }
 
+  if (land) {
+    char lines[6][24] = {{0}};
+    uint8_t rows = drawLandscapeWrappedStatus(tama.msg, lines, 6, panelW - 14);
+    int blockH = rows * 18;
+    int startY = (H - blockH) / 2;
+    if (startY < 26) startY = 26;
+    spr.setTextColor(p.text, p.bg);
+    for (uint8_t i = 0; i < rows; i++) spr.drawString(lines[i], X + panelW / 2, startY + i * 18);
+    spr.setTextDatum(TL_DATUM);
+    return;
+  }
+
   if (tama.nLines == 0) {
     static char msgDisp[8][24];
-    uint8_t nMsg = wrapIntoCenteredWords(tama.msg, msgDisp, 8, MAX_PX);
+    uint8_t nMsg = wrapIntoCenteredWords(tama.msg, msgDisp, 8, land ? (panelW - 12) : MAX_PX);
     if (nMsg == 0) {
       spr.setTextDatum(TL_DATUM);
       return;
     }
     spr.setTextColor(p.text, p.bg);
-    uint8_t shown = nMsg > SHOW ? SHOW : nMsg;
+    uint8_t shown = nMsg > (land ? 5 : SHOW) ? (land ? 5 : SHOW) : nMsg;
     int start = nMsg - shown;
     for (uint8_t i = 0; i < shown; i++) {
-      spr.drawString(msgDisp[start + i], W / 2, TOP + 8 + i * LH);
+      spr.drawString(msgDisp[start + i], X + panelW / 2, TOP + (land ? 18 : 8) + i * (land ? 12 : LH));
     }
     spr.setTextDatum(TL_DATUM);
     return;
@@ -1381,28 +1776,29 @@ void drawHUD() {
   static uint8_t srcOf[32];
   uint8_t nDisp = 0;
   for (uint8_t i = 0; i < tama.nLines && nDisp < 32; i++) {
-    uint8_t got = wrapIntoCenteredWords(tama.lines[i], &disp[nDisp], 32 - nDisp, MAX_PX);
+    uint8_t got = wrapIntoCenteredWords(tama.lines[i], &disp[nDisp], 32 - nDisp, land ? (panelW - 12) : MAX_PX);
     for (uint8_t j = 0; j < got; j++) srcOf[nDisp + j] = i;
     nDisp += got;
   }
 
-  uint8_t maxBack = (nDisp > SHOW) ? (nDisp - SHOW) : 0;
+  uint8_t visibleRows = land ? 5 : SHOW;
+  uint8_t maxBack = (nDisp > visibleRows) ? (nDisp - visibleRows) : 0;
   if (msgScroll > maxBack) msgScroll = maxBack;
 
   int end = (int)nDisp - msgScroll;
-  int start = end - SHOW; if (start < 0) start = 0;
+  int start = end - visibleRows; if (start < 0) start = 0;
   uint8_t newest = tama.nLines - 1;
   for (int i = 0; start + i < end; i++) {
     uint8_t row = start + i;
     bool fresh = (srcOf[row] == newest) && (msgScroll == 0);
     spr.setTextColor(fresh ? p.text : p.textDim, p.bg);
-    spr.drawString(disp[row], W / 2, TOP + 8 + i * LH);
+    spr.drawString(disp[row], X + panelW / 2, TOP + (land ? 18 : 8) + i * (land ? 12 : LH));
   }
   spr.setTextDatum(TL_DATUM);
   if (msgScroll > 0) {
     spr.setTextSize(1);
     spr.setTextColor(p.body, p.bg);
-    spr.setCursor(W - 22, TOP + AREA - 10);
+    spr.setCursor(X + panelW - 22, TOP + AREA - 10);
     spr.printf("-%u", msgScroll);
   }
 }
@@ -1427,8 +1823,7 @@ void setup() {
   dataLoadCache(&tama);
 
   // BLE stays always-on; s.bt is stored as a preference only.
-  spr.setColorDepth(16);
-  spr.createSprite(W, H);
+  configureUiGeometry(true);
   // Load GIF character first (if any), so buddyInit() skips ASCII rendering
   // when GIF mode is active. Fixes the "buddy appears as ASCII then suddenly
   // changes to GIF" on boot after a character transfer.
@@ -1679,6 +2074,7 @@ void loop() {
     } else if (displayMode == DISP_INFO) {
       beep(2400, 30);
       infoPage = (infoPage + 1) % INFO_PAGES;
+      applyDisplayMode();
     } else if (displayMode == DISP_PET) {
       beep(2400, 30);
       petPage = (petPage + 1) % PET_PAGES;
@@ -1712,7 +2108,7 @@ void loop() {
                && dataRtcValid() && _onUsb;
   if (clocking) clockUpdateOrient();
   else { clockOrient = 0; orientFrames = 0; paintedOrient = 0; }
-  bool landscapeClock = clocking && clockOrient != 0;
+  bool landscapeClock = false;
 
   static bool wasClocking = false;
   static bool wasLandscape = false;
@@ -1744,7 +2140,7 @@ void loop() {
   if (pk && !lastPasskey) { wake(); beep(1800, 60); }
   lastPasskey = pk;
 
-  if (napping || screenOff || landscapeClock) {
+  if (napping || screenOff) {
     // skip sprite render — face-down, powered off, or landscape clock
     // (which draws direct-to-LCD below)
   } else if (buddyMode) {
@@ -1774,9 +2170,7 @@ void loop() {
       spr.print("no character loaded");
     }
   }
-  if (landscapeClock) {
-    drawClock();
-  } else if (!napping && !screenOff) {
+  if (!napping && !screenOff) {
     if (blePasskey()) drawPasskey();
     else if (clocking) drawClock();
     else if (displayMode == DISP_INFO) drawInfo();

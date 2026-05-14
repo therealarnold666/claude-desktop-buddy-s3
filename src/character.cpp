@@ -48,11 +48,37 @@ static bool        peekMode = false;
 static TFT_eSPI*   _tgt = &spr;
 // Peek mode renders at half scale (2:1 nearest-neighbor in gifDrawCb) so
 // the whole pet fits the 70px window instead of cropping the top.
+static int peekDivisor() {
+  return 2;
+}
+
 static void gifPlace() {
-  int outW = peekMode ? gifW / 2 : gifW;
-  int outH = peekMode ? gifH / 2 : gifH;
-  gifX = (spr.width() - outW) / 2;
-  gifY = peekMode ? (PEEK_TOP - outH) / 2 : (140 - outH) / 2;
+  int div = peekDivisor();
+  int outW = peekMode ? gifW / div : gifW;
+  int outH = peekMode ? gifH / div : gifH;
+  bool land = spr.width() > spr.height();
+  if (peekMode) {
+    if (land) {
+      const int boxX = 20;
+      const int boxY = 34;
+      const int boxW = 76;
+      gifX = boxX + (boxW - outW) / 2;
+      gifY = boxY;
+    } else {
+      gifX = (spr.width() - outW) / 2;
+      gifY = (PEEK_TOP - outH) / 2;
+    }
+  } else {
+    if (land) {
+      int zoneW = 126;
+      gifX = (zoneW - outW) / 2;
+      if (gifX < 0) gifX = 0;
+      gifY = (spr.height() - outH) / 2;
+    } else {
+      gifX = (spr.width() - outW) / 2;
+      gifY = (140 - outH) / 2;
+    }
+  }
 }
 static uint32_t    nextFrameAt = 0;
 static uint32_t    animPauseUntil = 0;
@@ -116,12 +142,15 @@ static void gifDrawCb(GIFDRAW* d) {
   };
 
   if (peekMode) {
-    if (srcY & 1) return;
-    int y = gifY + (srcY >> 1);
-    if (y < 0 || y >= PEEK_TOP) return;
-    int x0 = gifX + (d->iX >> 1);
-    int w  = d->iWidth >> 1;
-    for (int i = 0; i < w; i++) put(x0 + i, y, src[i << 1]);
+    int div = peekDivisor();
+    if (srcY % div) return;
+    int y = gifY + (srcY / div);
+    int yLimit = (_tgt->width() > _tgt->height()) ? _tgt->height() : PEEK_TOP;
+    if (y < 0 || y >= yLimit) return;
+    int x0 = gifX + (d->iX / div);
+    int w  = d->iWidth / div;
+    if (w <= 0) w = 1;
+    for (int i = 0; i < w; i++) put(x0 + i, y, src[i * div]);
     return;
   }
 
